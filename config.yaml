@@ -1,0 +1,23 @@
+data:
+  raw_path: "data/raw/paysim.csv"
+  train_path: "data/processed/train.csv"
+  test_path: "data/processed/test.csv"
+
+columns:
+  step: "step"
+  transaction_type: "type"
+  amount: "amount"
+
+  origin_account: "nameOrig"
+  old_balance_origin: "oldbalanceOrg"
+  new_balance_origin: "newbalanceOrig"
+
+  destination_account: "nameDest"
+  old_balance_destination: "oldbalanceDest"
+  new_balance_destination: "newbalanceDest"
+
+  fraud_label: "isFraud"
+  flagged_fraud: "isFlaggedFraud"
+
+split:
+  train_ratio: 0.8
