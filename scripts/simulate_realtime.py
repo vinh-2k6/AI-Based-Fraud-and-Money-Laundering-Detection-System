@@ -11,8 +11,12 @@ import time
 from pathlib import Path
 from typing import cast
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DEFAULT_FILE_PATH = Path("data") / "test_cleaned.csv"
+DEFAULT_FILE_PATH = Path("data") / "processed" / "test_cleaned.csv"
 MAX_VERBOSE_ROWS = 10
 
 

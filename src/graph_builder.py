@@ -40,6 +40,14 @@ MAPPING_PK = PROC_DIR / "account_mapping.pkl"
 # 500_000 rows x 74 OHE cols x 4 bytes ~ 148 MB/chunk - an toan tren moi may
 OHE_CHUNK_SIZE = 500_000
 
+CONTINUOUS_EDGE_COLS = [
+    "Amount_scaled",
+    "sender_tx_count_24h_scaled",
+    "receiver_tx_count_24h_scaled",
+    "sender_amount_sum_24h_scaled",
+    "time_since_last_sender_tx_scaled",
+]
+
 CATEGORICAL_COLS = [
     "Payment_currency",
     "Received_currency",
@@ -147,9 +155,9 @@ def process_edge_features(
     Xu ly dac trung canh theo tung chunk de tranh OOM voi dataset lon.
 
     Feature layout:
-        [0]       Amount_scaled                (1 chieu)
-        [1..6]    sin/cos cua hour, dow, month (6 chieu)
-        [7..]     One-Hot categorical           (tong so category)
+        [0..K]    Amount_scaled & cac continuous temporal features
+        [...]     sin/cos cua hour, dow, month (6 chieu)
+        [...]     One-Hot categorical (tong so category)
 
     Args:
         df         : DataFrame chua cac cot can thiet.
@@ -160,12 +168,15 @@ def process_edge_features(
         edge_attr  : torch.Tensor [E, F_edge]
     """
     chunk_tensors = []
+    avail_cont_cols = [c for c in CONTINUOUS_EDGE_COLS if c in df.columns]
+    if not avail_cont_cols:
+        avail_cont_cols = ["Amount_scaled"]
 
     for start in range(0, len(df), chunk_size):
         chunk = df.iloc[start : start + chunk_size]
 
-        # a. Amount (lien tuc, da scale)
-        amount_np = chunk[["Amount_scaled"]].values.astype(np.float32)
+        # a. Continuous features (Amount + Causal Temporal Features)
+        cont_np = chunk[avail_cont_cols].values.astype(np.float32)
 
         # b. Cyclical time encoding
         #    sin/cos dam bao hour=23 va hour=0 gan nhau ve khoang cach so hoc
@@ -180,11 +191,11 @@ def process_edge_features(
         cat_np = ohe.transform(chunk[CATEGORICAL_COLS])  # [chunk, total_cats]
 
         # Gop lai va chuyen sang tensor ngay -> giai phong numpy ngay sau do
-        chunk_np = np.hstack([amount_np, time_np, cat_np])
+        chunk_np = np.hstack([cont_np, time_np, cat_np])
         chunk_tensors.append(torch.tensor(chunk_np, dtype=torch.float))
 
         # Giai phong bo nho numpy cua chunk nay truoc khi xu ly chunk tiep
-        del amount_np, time_np, cat_np, chunk_np
+        del cont_np, time_np, cat_np, chunk_np
 
     return torch.cat(chunk_tensors, dim=0)
 

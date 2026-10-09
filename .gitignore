@@ -217,5 +217,9 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Project dataset
+# Project datasets & large artifacts
 data/raw/
+data/processed/*.csv
+data/processed/*.pt
+*.pth
+*.pt
