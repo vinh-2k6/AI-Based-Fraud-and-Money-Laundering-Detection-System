@@ -147,7 +147,7 @@ def train():
 
     # 4. Vòng lặp huấn luyện 
     epochs = 12
-    max_batches_per_epoch = 300  # giới hạn batch trong mỗi epoch 
+    max_batches_per_epoch = 350  # giới hạn batch trong mỗi epoch 
 
     print("\nBắt đầu huấn luyện...")
     for epoch in range(1, epochs + 1):
