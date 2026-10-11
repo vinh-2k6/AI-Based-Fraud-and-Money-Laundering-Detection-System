@@ -176,6 +176,16 @@ def train():
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         print(f"Epoch {epoch}/{epochs} - Loss: {avg_loss:.4f}")
 
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "in_channels": train_data.x.shape[1],
+            "hidden_channels": 64,
+        },
+        "data/processed/graphsage_model.pt",
+    )
+    print("Đã lưu checkpoint GraphSAGE: data/processed/graphsage_model.pt")
+
     # 5. Đánh giá trên tập Test
     print("\nĐang đánh giá mô hình trên tập Test...")
     model.eval()

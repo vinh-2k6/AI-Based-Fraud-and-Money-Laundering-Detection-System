@@ -38,6 +38,8 @@ model = xgb.XGBClassifier(
     tree_method='hist'        # Tham số  khi dùng enable_categorical
 )
 model.fit(X_train, y_train)
+model.save_model("data/processed/xgboost_baseline.json")
+print("Đã lưu mô hình XGBoost: data/processed/xgboost_baseline.json")
 
 print("Đang đánh giá trên tập Test...")
 y_pred = model.predict(X_test)
