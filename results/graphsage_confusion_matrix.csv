@@ -1,0 +1,3 @@
+,predicted_0_legitimate,predicted_1_fraud_aml
+actual_0_legitimate,1895232,3596
+actual_1_fraud_aml,507,1636

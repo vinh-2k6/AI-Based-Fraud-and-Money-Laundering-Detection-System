@@ -1,6 +1,6 @@
 import pandas as pd
 from pathlib import Path
-
+import matplotlib.pyplot as plt
 
 # ============================================================
 # 1. LOAD DATA
@@ -549,3 +549,163 @@ print(
         ["Sender_account", "Receiver_account"]
     ].drop_duplicates().shape[0]
 )
+
+
+# ============================================================
+# 16. VISUALIZATION - SAVE 4 FIGURES
+# ============================================================
+
+# Thư mục lưu hình ảnh
+FIGURE_DIR = PROJECT_ROOT / "data" / "processed" / "figures_samld"
+FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+
+print("\n" + "=" * 70)
+print("GENERATING VISUALIZATIONS")
+print("=" * 70)
+
+
+# ------------------------------------------------------------
+# 1. AMOUNT DISTRIBUTION
+# File: amount_distribution.png
+# ------------------------------------------------------------
+
+plt.figure(figsize=(10, 6))
+
+plt.hist(df["Amount"].dropna(), bins=100)
+
+plt.xscale("log")
+plt.yscale("log")
+
+plt.title("Transaction Amount Distribution")
+plt.xlabel("Transaction Amount (log scale)")
+plt.ylabel("Number of Transactions (log scale)")
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(
+    FIGURE_DIR / "amount_distribution.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+plt.close()
+
+
+# ------------------------------------------------------------
+# 2. FRAUD BY LAUNDERING TYPE
+# File: fraud_by_type.png
+# ------------------------------------------------------------
+
+fraud_by_type = (
+    df[df["Is_laundering"] == 1]["Laundering_type"]
+    .value_counts()
+    .sort_values(ascending=True)
+)
+
+plt.figure(figsize=(12, 8))
+
+fraud_by_type.plot(kind="barh")
+
+plt.title("Money Laundering Transactions by Type")
+plt.xlabel("Number of Transactions")
+plt.ylabel("Laundering Type")
+plt.grid(axis="x", alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(
+    FIGURE_DIR / "fraud_by_type.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+plt.close()
+
+
+# ------------------------------------------------------------
+# 3. NORMAL VS LAUNDERING DISTRIBUTION
+# File: fraud_distribution.png
+# ------------------------------------------------------------
+
+class_counts = df["Is_laundering"].value_counts().reindex(
+    [0, 1], fill_value=0
+)
+
+labels = ["Normal", "Money Laundering"]
+counts = class_counts.to_numpy()
+total = counts.sum()
+percentages = counts / total * 100
+
+plt.figure(figsize=(8, 6))
+
+bars = plt.bar(labels, counts)
+
+plt.title("Transaction Class Distribution")
+plt.xlabel("Transaction Class")
+plt.ylabel("Number of Transactions")
+plt.yscale("log")
+plt.grid(axis="y", alpha=0.3)
+
+# Ghi số lượng và tỷ lệ lên từng cột
+for bar, count, percentage in zip(
+    bars, counts, percentages
+):
+    plt.text(
+        bar.get_x() + bar.get_width() / 2,
+        bar.get_height(),
+        f"{count:,}\n({percentage:.4f}%)",
+        ha="center",
+        va="bottom",
+        fontsize=9
+    )
+
+plt.tight_layout()
+plt.savefig(
+    FIGURE_DIR / "fraud_distribution.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+plt.close()
+
+
+# ------------------------------------------------------------
+# 4. TRANSACTION TYPES
+# File: transaction_types.png
+# ------------------------------------------------------------
+
+transaction_type_counts = (
+    df["Payment_type"]
+    .value_counts()
+    .sort_values(ascending=True)
+)
+
+plt.figure(figsize=(10, 6))
+
+transaction_type_counts.plot(kind="barh")
+
+plt.title("Distribution of Transaction Types")
+plt.xlabel("Number of Transactions")
+plt.ylabel("Payment Type")
+plt.grid(axis="x", alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(
+    FIGURE_DIR / "transaction_types.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+plt.close()
+
+
+# ------------------------------------------------------------
+# 5. OUTPUT SUMMARY
+# ------------------------------------------------------------
+
+print("\nFour figures generated successfully:")
+
+for filename in [
+    "amount_distribution.png",
+    "fraud_by_type.png",
+    "fraud_distribution.png",
+    "transaction_types.png"
+]:
+    print(FIGURE_DIR / filename)
+
+print("\nAll figures saved successfully.")
