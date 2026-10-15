@@ -170,7 +170,7 @@ def train():
             total_loss += loss.item() * batch_size_current
             total_samples += batch_size_current
             
-            if i >= max_batches_per_epoch:
+            if i + 1 >= max_batches_per_epoch:
                 break
                 
         avg_loss = total_loss / total_samples if total_samples > 0 else 0

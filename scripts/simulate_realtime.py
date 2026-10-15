@@ -5,11 +5,21 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
+import pickle
 import statistics
 import sys
 import time
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+import torch
+
+from src.models.gnn_model import FraudDetectionGNN
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -17,7 +27,13 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 DEFAULT_FILE_PATH = Path("data") / "processed" / "test_cleaned.csv"
+DEFAULT_GRAPH_PATH = BASE_DIR / "data" / "processed" / "data_train.pt"
+DEFAULT_MAPPING_PATH = BASE_DIR / "data" / "processed" / "account_mapping.pkl"
+DEFAULT_CHECKPOINT_PATH = BASE_DIR / "data" / "processed" / "graphsage_model.pt"
+DEFAULT_THRESHOLD = 0.5
 MAX_VERBOSE_ROWS = 10
+
+_INFERENCE_RUNTIME: dict[str, Any] | None = None
 
 
 def parse_row(row: dict[str, str | None]) -> dict[str, object]:
@@ -44,19 +60,174 @@ def parse_row(row: dict[str, str | None]) -> dict[str, object]:
     return parsed_row
 
 
-def infer_transaction(tx_json: str) -> None:
-    """Hàm giữ chỗ cho việc tích hợp GraphSAGE và GNNExplainer sau này."""
-    pass
+def _load_inference_runtime() -> dict[str, Any]:
+    """Nạp các artifact suy luận một lần và giữ chúng trong bộ nhớ."""
+    global _INFERENCE_RUNTIME
+    if _INFERENCE_RUNTIME is not None:
+        return _INFERENCE_RUNTIME
+
+    for path, description in (
+        (DEFAULT_GRAPH_PATH, "đồ thị train"),
+        (DEFAULT_MAPPING_PATH, "account mapping"),
+        (DEFAULT_CHECKPOINT_PATH, "GraphSAGE checkpoint"),
+    ):
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Không tìm thấy {description}: {path}. "
+                "Hãy chạy pipeline xây dựng graph và huấn luyện model trước."
+            )
+
+    graph = torch.load(DEFAULT_GRAPH_PATH, map_location="cpu", weights_only=False)
+    with DEFAULT_MAPPING_PATH.open("rb") as mapping_file:
+        mapping = pickle.load(mapping_file)
+
+    if not isinstance(mapping, dict) or "account_to_idx" not in mapping:
+        raise ValueError(
+            f"Định dạng account mapping không hợp lệ: {DEFAULT_MAPPING_PATH}"
+        )
+    account_to_idx = mapping["account_to_idx"]
+    if not isinstance(account_to_idx, dict):
+        raise ValueError(
+            f"account_to_idx trong mapping không phải dictionary: {DEFAULT_MAPPING_PATH}"
+        )
+
+    checkpoint = torch.load(
+        DEFAULT_CHECKPOINT_PATH, map_location="cpu", weights_only=False
+    )
+    if not isinstance(checkpoint, dict):
+        raise ValueError(
+            f"Định dạng checkpoint GraphSAGE không hợp lệ: {DEFAULT_CHECKPOINT_PATH}"
+        )
+    state_dict = checkpoint.get("model_state_dict")
+    if not isinstance(state_dict, dict):
+        raise ValueError(
+            f"Checkpoint không chứa model_state_dict: {DEFAULT_CHECKPOINT_PATH}"
+        )
+
+    in_channels = int(checkpoint.get("in_channels", graph.x.shape[1]))
+    hidden_channels = int(checkpoint.get("hidden_channels", 64))
+    if graph.x.shape[1] != in_channels:
+        raise ValueError(
+            "Số chiều node feature không khớp checkpoint: "
+            f"graph={graph.x.shape[1]}, checkpoint={in_channels}"
+        )
+
+    model = FraudDetectionGNN(
+        in_channels=in_channels,
+        hidden_channels=hidden_channels,
+    )
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    with torch.no_grad():
+        node_embeddings = model.conv1(graph.x, graph.edge_index).relu()
+        node_embeddings = model.conv2(
+            node_embeddings, graph.edge_index
+        ).relu()
+
+    _INFERENCE_RUNTIME = {
+        "account_to_idx": account_to_idx,
+        "node_embeddings": node_embeddings,
+        "classifier": model.classifier,
+    }
+    return _INFERENCE_RUNTIME
 
 
-def process_transaction(row: dict[str, str | None]) -> tuple[str, float]:
+def infer_transaction(
+    tx_json: str,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> dict[str, object]:
+    """Dự đoán một giao dịch bằng GraphSAGE trên graph train.
+
+    ``tx_json`` phải chứa ``Sender_account`` và ``Receiver_account``. Graph
+    train được dùng làm ngữ cảnh để không dùng giao dịch tương lai khi mô
+    phỏng streaming.
+    """
+    if not 0.0 <= threshold <= 1.0 or not math.isfinite(threshold):
+        raise ValueError("threshold phải là số hữu hạn trong khoảng [0, 1]")
+
+    try:
+        transaction = json.loads(tx_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"tx_json không phải JSON hợp lệ: {exc.msg}") from exc
+    if not isinstance(transaction, dict):
+        raise ValueError("tx_json phải mã hóa một JSON object")
+
+    required_fields = ("Sender_account", "Receiver_account")
+    missing_fields = [field for field in required_fields if field not in transaction]
+    if missing_fields:
+        raise ValueError(
+            "Giao dịch thiếu trường bắt buộc: " + ", ".join(missing_fields)
+        )
+
+    try:
+        sender_account = int(transaction["Sender_account"])
+        receiver_account = int(transaction["Receiver_account"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "Sender_account và Receiver_account phải là số nguyên"
+        ) from exc
+
+    runtime = _load_inference_runtime()
+    account_to_idx = runtime["account_to_idx"]
+    missing_accounts = [
+        account
+        for account in (sender_account, receiver_account)
+        if account not in account_to_idx
+    ]
+    if missing_accounts:
+        unique_missing = dict.fromkeys(missing_accounts)
+        raise ValueError(
+            "Không tìm thấy Account ID trong mapping: "
+            + ", ".join(str(account) for account in unique_missing)
+        )
+
+    sender_idx = int(account_to_idx[sender_account])
+    receiver_idx = int(account_to_idx[receiver_account])
+    node_embeddings = runtime["node_embeddings"]
+    node_count = int(node_embeddings.size(0))
+    if not 0 <= sender_idx < node_count or not 0 <= receiver_idx < node_count:
+        raise ValueError(
+            "Account mapping trỏ tới node index ngoài phạm vi graph train"
+        )
+
+    edge_embedding = torch.cat(
+        [
+            node_embeddings[sender_idx],
+            node_embeddings[receiver_idx],
+        ],
+        dim=-1,
+    )
+    with torch.no_grad():
+        logit = runtime["classifier"](edge_embedding)
+        probability = float(torch.sigmoid(logit).reshape(-1)[0].item())
+
+    return {
+        "sender_account": sender_account,
+        "receiver_account": receiver_account,
+        "fraud_probability": probability,
+        "is_fraud": probability >= threshold,
+        "threshold": threshold,
+    }
+
+
+def process_transaction(
+    row: dict[str, str | None],
+    verbose: bool = False,
+) -> tuple[str, float]:
     """Phân tích, chuyển một dòng CSV thành JSON và trả về JSON cùng độ trễ."""
     start_time = time.perf_counter()
     parsed_row = parse_row(row)
     tx_json = json.dumps(parsed_row, ensure_ascii=False)
-    infer_transaction(tx_json)
+    inference = infer_transaction(tx_json)
     end_time = time.perf_counter()
     latency = end_time - start_time
+    if verbose:
+        print(
+            "Kết quả GraphSAGE: "
+            f"fraud_probability={inference['fraud_probability']:.6f}, "
+            f"is_fraud={inference['is_fraud']}"
+        )
     return tx_json, latency
 
 
@@ -123,7 +294,7 @@ def load_and_simulate_transactions(
                 total_rows += 1
                 try:
                     row = _validate_row(raw_row, fieldnames)
-                    tx_json, latency = process_transaction(row)
+                    tx_json, latency = process_transaction(row, verbose=verbose)
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     error_rows += 1
                     print(
