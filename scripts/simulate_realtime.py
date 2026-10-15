@@ -18,7 +18,10 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 import torch
+from torch_geometric.data import Data
+from torch_geometric.utils import k_hop_subgraph, subgraph, to_undirected
 
+from src.gnn_explainer import FraudGNNExplainer
 from src.models.gnn_model import FraudDetectionGNN
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -30,10 +33,13 @@ DEFAULT_FILE_PATH = Path("data") / "processed" / "test_cleaned.csv"
 DEFAULT_GRAPH_PATH = BASE_DIR / "data" / "processed" / "data_train.pt"
 DEFAULT_MAPPING_PATH = BASE_DIR / "data" / "processed" / "account_mapping.pkl"
 DEFAULT_CHECKPOINT_PATH = BASE_DIR / "data" / "processed" / "graphsage_model.pt"
+DEFAULT_XAI_OUTPUT_DIR = BASE_DIR / "data" / "processed" / "xai_explanations"
 DEFAULT_THRESHOLD = 0.5
+DEFAULT_XAI_EPOCHS = 200
 MAX_VERBOSE_ROWS = 10
 
 _INFERENCE_RUNTIME: dict[str, Any] | None = None
+_XAI_EXPLAINER: FraudGNNExplainer | None = None
 
 
 def parse_row(row: dict[str, str | None]) -> dict[str, object]:
@@ -126,16 +132,104 @@ def _load_inference_runtime() -> dict[str, Any]:
         ).relu()
 
     _INFERENCE_RUNTIME = {
+        "graph": graph,
         "account_to_idx": account_to_idx,
         "node_embeddings": node_embeddings,
         "classifier": model.classifier,
+        "model": model,
     }
     return _INFERENCE_RUNTIME
+
+
+def _build_transaction_subgraph(
+    graph: Data,
+    sender_idx: int,
+    receiver_idx: int,
+    account_to_idx: dict[int, int],
+    num_hops: int = 2,
+) -> Data:
+    """Build a local graph around a realtime transaction."""
+    if num_hops <= 0:
+        raise ValueError("num_hops phải lớn hơn 0")
+    graph_node_count = int(graph.x.size(0))
+    for node_idx in (sender_idx, receiver_idx):
+        if not 0 <= node_idx < graph_node_count:
+            raise ValueError(
+                f"Node index {node_idx} nằm ngoài phạm vi graph "
+                f"[0, {graph_node_count - 1}]"
+            )
+
+    undirected_edges = to_undirected(graph.edge_index)
+    subset_nodes, _, _, _ = k_hop_subgraph(
+        node_idx=torch.tensor([sender_idx, receiver_idx], dtype=torch.long),
+        num_hops=num_hops,
+        edge_index=undirected_edges,
+        relabel_nodes=False,
+        num_nodes=graph_node_count,
+    )
+    local_edge_index, local_edge_attr = subgraph(
+        subset=subset_nodes,
+        edge_index=graph.edge_index,
+        edge_attr=getattr(graph, "edge_attr", None),
+        relabel_nodes=True,
+        num_nodes=graph_node_count,
+    )
+    global_to_local = {
+        int(global_idx): local_idx
+        for local_idx, global_idx in enumerate(subset_nodes.tolist())
+    }
+    target_edge_label_index = torch.tensor(
+        [
+            [global_to_local[sender_idx]],
+            [global_to_local[receiver_idx]],
+        ],
+        dtype=torch.long,
+    )
+    idx_to_account = {idx: account for account, idx in account_to_idx.items()}
+    sub_data = Data(
+        x=graph.x[subset_nodes],
+        edge_index=local_edge_index,
+        edge_attr=local_edge_attr,
+        num_nodes=subset_nodes.numel(),
+    )
+    sub_data.target_edge_label_index = target_edge_label_index
+    sub_data.orig_node_indices = subset_nodes
+    sub_data.orig_account_ids = [
+        idx_to_account.get(int(node_idx), int(node_idx))
+        for node_idx in subset_nodes
+    ]
+    sub_data.metadata = {
+        "src_account": idx_to_account.get(sender_idx, sender_idx),
+        "dst_account": idx_to_account.get(receiver_idx, receiver_idx),
+        "num_hops": num_hops,
+        "source": "realtime_inference",
+    }
+    return sub_data
+
+
+def _explain_transaction(
+    sub_data: Data,
+    epochs: int = DEFAULT_XAI_EPOCHS,
+) -> dict[str, object]:
+    """Run XAI lazily; this function is called only for fraud predictions."""
+    global _XAI_EXPLAINER
+    runtime = _load_inference_runtime()
+    if _XAI_EXPLAINER is None:
+        _XAI_EXPLAINER = FraudGNNExplainer(
+            model=runtime["model"],
+            device="cpu",
+            epochs=epochs,
+        )
+    explanation = _XAI_EXPLAINER.explain_subgraph(sub_data)
+    return explanation
 
 
 def infer_transaction(
     tx_json: str,
     threshold: float = DEFAULT_THRESHOLD,
+    xai_epochs: int = DEFAULT_XAI_EPOCHS,
+    xai_num_hops: int = 2,
+    xai_output_path: str | Path | None = None,
 ) -> dict[str, object]:
     """Dự đoán một giao dịch bằng GraphSAGE trên graph train.
 
@@ -202,24 +296,58 @@ def infer_transaction(
         logit = runtime["classifier"](edge_embedding)
         probability = float(torch.sigmoid(logit).reshape(-1)[0].item())
 
-    return {
+    result: dict[str, object] = {
         "sender_account": sender_account,
         "receiver_account": receiver_account,
         "fraud_probability": probability,
         "is_fraud": probability >= threshold,
         "threshold": threshold,
     }
+    if not result["is_fraud"]:
+        return result
+
+    sub_data = _build_transaction_subgraph(
+        graph=runtime["graph"],
+        sender_idx=sender_idx,
+        receiver_idx=receiver_idx,
+        account_to_idx=account_to_idx,
+        num_hops=xai_num_hops,
+    )
+    explanation = _explain_transaction(sub_data, epochs=xai_epochs)
+    if xai_output_path is not None:
+        FraudGNNExplainer.save_explanation(
+            explanation,
+            xai_output_path,
+            source_subgraph="realtime_transaction",
+        )
+        result["xai_output_path"] = str(xai_output_path)
+    result["explanation"] = explanation
+    return result
 
 
 def process_transaction(
     row: dict[str, str | None],
     verbose: bool = False,
+    xai_epochs: int = DEFAULT_XAI_EPOCHS,
+    xai_num_hops: int = 2,
+    xai_output_dir: Path | None = None,
 ) -> tuple[str, float]:
     """Phân tích, chuyển một dòng CSV thành JSON và trả về JSON cùng độ trễ."""
     start_time = time.perf_counter()
     parsed_row = parse_row(row)
     tx_json = json.dumps(parsed_row, ensure_ascii=False)
-    inference = infer_transaction(tx_json)
+    xai_output_path = None
+    if xai_output_dir is not None:
+        xai_output_path = xai_output_dir / (
+            f"realtime_{parsed_row['Sender_account']}_"
+            f"{parsed_row['Receiver_account']}.pt"
+        )
+    inference = infer_transaction(
+        tx_json,
+        xai_epochs=xai_epochs,
+        xai_num_hops=xai_num_hops,
+        xai_output_path=xai_output_path,
+    )
     end_time = time.perf_counter()
     latency = end_time - start_time
     if verbose:
@@ -228,6 +356,8 @@ def process_transaction(
             f"fraud_probability={inference['fraud_probability']:.6f}, "
             f"is_fraud={inference['is_fraud']}"
         )
+        if inference["is_fraud"]:
+            print("Đã chạy GNNExplainer cho giao dịch bị đánh dấu fraud")
     return tx_json, latency
 
 
@@ -265,6 +395,9 @@ def load_and_simulate_transactions(
     file_path: str | Path,
     limit: int | None = None,
     verbose: bool = False,
+    xai_epochs: int = DEFAULT_XAI_EPOCHS,
+    xai_num_hops: int = 2,
+    xai_output_dir: str | Path | None = None,
 ) -> tuple[list[float], int, int, float]:
     """Đọc tuần tự giao dịch từ CSV và thu thập số liệu xử lý."""
     if limit is not None and limit <= 0:
@@ -275,6 +408,11 @@ def load_and_simulate_transactions(
     error_rows = 0
     start_time = time.perf_counter()
     resolved_path = _resolve_file_path(file_path)
+    resolved_xai_dir = (
+        _resolve_file_path(xai_output_dir)
+        if xai_output_dir is not None
+        else None
+    )
 
     try:
         with resolved_path.open(
@@ -294,7 +432,13 @@ def load_and_simulate_transactions(
                 total_rows += 1
                 try:
                     row = _validate_row(raw_row, fieldnames)
-                    tx_json, latency = process_transaction(row, verbose=verbose)
+                    tx_json, latency = process_transaction(
+                        row,
+                        verbose=verbose,
+                        xai_epochs=xai_epochs,
+                        xai_num_hops=xai_num_hops,
+                        xai_output_dir=resolved_xai_dir,
+                    )
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     error_rows += 1
                     print(
@@ -400,6 +544,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="in chi tiết tối đa 10 giao dịch đầu tiên",
     )
+    parser.add_argument(
+        "--xai-epochs",
+        type=_positive_int,
+        default=DEFAULT_XAI_EPOCHS,
+        help="số epoch GNNExplainer khi transaction bị đánh dấu fraud",
+    )
+    parser.add_argument(
+        "--xai-num-hops",
+        type=_positive_int,
+        default=2,
+        help="bán kính subgraph realtime đưa vào GNNExplainer",
+    )
+    parser.add_argument(
+        "--xai-output-dir",
+        type=Path,
+        default=None,
+        help="thư mục lưu explanation realtime; bỏ qua nếu không truyền",
+    )
     return parser
 
 
@@ -411,6 +573,9 @@ def main() -> None:
             file_path=args.file_path,
             limit=args.limit,
             verbose=args.verbose,
+            xai_epochs=args.xai_epochs,
+            xai_num_hops=args.xai_num_hops,
+            xai_output_dir=args.xai_output_dir,
         )
     except (
         FileNotFoundError,
