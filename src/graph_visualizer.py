@@ -96,6 +96,7 @@ class SubgraphXaiVisualizer:
         mask_threshold: float = 0.5,
         dpi: int = 300,
         figsize: tuple[int, int] = (12, 9),
+        node_importance: torch.Tensor | np.ndarray | None = None,
     ) -> Path:
         """
         Vẽ đồ thị con giải thích bằng NetworkX và Matplotlib.
@@ -116,6 +117,29 @@ class SubgraphXaiVisualizer:
                 edge_weights = edge_mask.detach().cpu().numpy().astype(np.float32)
             else:
                 edge_weights = np.asarray(edge_mask, dtype=np.float32)
+            edge_weights = edge_weights.reshape(-1)
+            if edge_weights.size != num_edges:
+                raise ValueError(
+                    f"edge_mask có {edge_weights.size} phần tử, cần {num_edges}"
+                )
+
+        if node_importance is None and hasattr(sub_data, "node_importance"):
+            node_importance = sub_data.node_importance
+        if node_importance is not None:
+            if isinstance(node_importance, torch.Tensor):
+                node_weights = node_importance.detach().cpu().numpy().astype(np.float32)
+            else:
+                node_weights = np.asarray(node_importance, dtype=np.float32)
+            node_weights = node_weights.reshape(-1)
+            if node_weights.size != num_nodes:
+                raise ValueError(
+                    f"node_importance có {node_weights.size} phần tử, cần {num_nodes}"
+                )
+            node_max = float(node_weights.max()) if node_weights.size else 0.0
+            node_cutoff = node_max * mask_threshold
+        else:
+            node_weights = None
+            node_cutoff = float("inf")
 
         node_accounts = self.map_tensor_indices_to_accounts(sub_data)
         node_labels = {
@@ -147,6 +171,9 @@ class SubgraphXaiVisualizer:
             elif n == target_v:
                 node_colors.append("#7209b7")  # Tím - Receiver mục tiêu
                 node_sizes.append(1000)
+            elif node_weights is not None and node_weights[n] >= node_cutoff:
+                node_colors.append("#90be6d")  # Xanh - node quan trọng theo XAI
+                node_sizes.append(850)
             elif G.degree(n) > 4:
                 node_colors.append("#f77f00")  # Cam - Nút luân chuyển
                 node_sizes.append(700)
@@ -199,6 +226,7 @@ class SubgraphXaiVisualizer:
             mpatches.Patch(facecolor="#d90429", label="Sender mục tiêu"),
             mpatches.Patch(facecolor="#7209b7", label="Receiver mục tiêu"),
             mpatches.Patch(facecolor="#f77f00", label="Tài khoản luân chuyển (Degree > 4)"),
+            mpatches.Patch(facecolor="#90be6d", label="Node quan trọng (GNNExplainer)"),
             mpatches.Patch(facecolor="#8ecae6", label="Tài khoản lân cận"),
             mpatches.Patch(facecolor="#d00000", label=f"Cạnh quan trọng (edge_mask >= {mask_threshold})"),
             mpatches.Patch(facecolor="#adb5bd", label="Giao dịch bình thường"),
@@ -235,12 +263,14 @@ def visualize_subgraph(
     edge_mask: torch.Tensor | np.ndarray | None = None,
     output_path: Path | str | None = None,
     mask_threshold: float = 0.5,
+    node_importance: torch.Tensor | np.ndarray | None = None,
 ) -> Path:
     """Hàm tiện ích gọi nhanh cho các thành viên trong nhóm."""
     viz = SubgraphXaiVisualizer()
     return viz.plot_subgraph_explanation(
         sub_data=sub_data,
         edge_mask=edge_mask,
+        node_importance=node_importance,
         output_path=output_path,
         mask_threshold=mask_threshold,
     )
