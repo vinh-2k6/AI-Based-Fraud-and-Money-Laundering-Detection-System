@@ -1,12 +1,12 @@
 """
 src/graph_visualizer.py
 ========================
-Module trực quan hóa đồ thị con giải thích XAI.
+Module trực quan hóa đồ thị con giải thích XAI
 
 Nhiệm vụ:
-  1. Ánh xạ ngược chỉ số tensor nội bộ về ID tài khoản gốc.
-  2. Chuyển đổi đồ thị con PyG sang NetworkX DiGraph.
-  3. Trực quan hóa và làm nổi bật các cạnh có trọng số edge_mask cao.
+  1. Ánh xạ ngược chỉ số tensor nội bộ về ID tài khoản gốc
+  2. Chuyển đổi đồ thị con PyG sang NetworkX DiGraph
+  3. Trực quan hóa và làm nổi bật các cạnh có trọng số edge_mask cao
 """
 
 from __future__ import annotations
@@ -36,6 +36,8 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 PROC_DIR = BASE_DIR / "data" / "processed"
 DEFAULT_MAPPING_PATH = PROC_DIR / "account_mapping.pkl"
 
+from src.utils.graph_utils import load_account_mapping
+
 
 class SubgraphXaiVisualizer:
     """
@@ -48,10 +50,7 @@ class SubgraphXaiVisualizer:
             p = Path(mapping_path)
             if p.exists():
                 try:
-                    with open(p, "rb") as f:
-                        raw = pickle.load(f)
-                    acc_to_idx = raw.get("account_to_idx", raw) if isinstance(raw, dict) else {}
-                    self.idx_to_account = {idx: acc for acc, idx in acc_to_idx.items()}
+                    _, _, self.idx_to_account = load_account_mapping(p, use_cache=True)
                 except Exception as e:
                     print(f"[Visualizer] Cảnh báo không đọc được account_mapping.pkl: {e}")
 

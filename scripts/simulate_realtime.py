@@ -32,7 +32,12 @@ if hasattr(sys.stderr, "reconfigure"):
 DEFAULT_FILE_PATH = Path("data") / "processed" / "test_cleaned.csv"
 DEFAULT_GRAPH_PATH = BASE_DIR / "data" / "processed" / "data_train.pt"
 DEFAULT_MAPPING_PATH = BASE_DIR / "data" / "processed" / "account_mapping.pkl"
-DEFAULT_CHECKPOINT_PATH = BASE_DIR / "data" / "processed" / "graphsage_model.pt"
+DEFAULT_FROZEN_CHECKPOINT = BASE_DIR / "data" / "processed" / "graphsage_frozen.pt"
+DEFAULT_CHECKPOINT_PATH = (
+    DEFAULT_FROZEN_CHECKPOINT
+    if DEFAULT_FROZEN_CHECKPOINT.exists()
+    else BASE_DIR / "data" / "processed" / "graphsage_model.pt"
+)
 DEFAULT_XAI_OUTPUT_DIR = BASE_DIR / "data" / "processed" / "xai_explanations"
 DEFAULT_THRESHOLD = 0.5
 DEFAULT_XAI_EPOCHS = 200
