@@ -1,4 +1,23 @@
-"""Mô phỏng luồng giao dịch thời gian thực từ tệp CSV."""
+"""
+scripts/simulate_realtime.py
+============================
+Mô phỏng luồng giao dịch thời gian thực (Streaming Pipeline Simulation) phục vụ
+kiểm thử End-to-End, đo độ trễ toàn trình và tối ưu hóa hệ thống (Tuần 5).
+
+Kiến trúc tích hợp:
+  1. DataProcessor (Thành viên 1 - Data Engineer):
+     - Tiếp nhận bản ghi giao dịch thô hoặc pre-cleaned từ luồng streaming.
+     - Trích xuất đặc trưng Causal Sliding Window 24h, mã hóa chu kỳ (cyclical) và One-Hot.
+     - Chuẩn hóa MinMaxScaler và chuyển đổi trực tiếp sang tensor PyTorch Geometric.
+  2. GraphSAGE Inference (Thành viên 2 - Graph Engineer & Thành viên 3 - AI Architect):
+     - Truy xuất embedding của nút gửi (sender) và nút nhận (receiver).
+     - Đưa qua lớp Classifier để tính xác suất gian lận / rửa tiền (Fraud Probability).
+  3. Đo kiểm và Phân rã độ trễ (Thành viên 4 - MLOps & Reporter):
+     - Data Processing Latency (Thành viên 1)
+     - GraphSAGE Inference Latency (Thành viên 2/3)
+     - Total End-to-End Latency
+     - Xác nhận tiêu chuẩn kỹ thuật SLA: Tổng độ trễ toàn trình < 100ms.
+"""
 
 from __future__ import annotations
 
@@ -6,25 +25,29 @@ import argparse
 import csv
 import json
 import math
+from pathlib import Path
 import pickle
 import statistics
 import sys
 import time
-from pathlib import Path
 from typing import Any, cast
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+import numpy as np
 import torch
 
+from src.data_processor import DataProcessor, ProcessedTransaction
 from src.models.gnn_model import FraudDetectionGNN
 
 if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 DEFAULT_FILE_PATH = Path("data") / "processed" / "test_cleaned.csv"
 DEFAULT_GRAPH_PATH = BASE_DIR / "data" / "processed" / "data_train.pt"
@@ -34,6 +57,15 @@ DEFAULT_THRESHOLD = 0.5
 MAX_VERBOSE_ROWS = 10
 
 _INFERENCE_RUNTIME: dict[str, Any] | None = None
+_DATA_PROCESSOR: DataProcessor | None = None
+
+
+def get_data_processor() -> DataProcessor:
+    """Khởi tạo hoặc lấy singleton DataProcessor."""
+    global _DATA_PROCESSOR
+    if _DATA_PROCESSOR is None:
+        _DATA_PROCESSOR = DataProcessor(base_dir=BASE_DIR, device="cpu")
+    return _DATA_PROCESSOR
 
 
 def parse_row(row: dict[str, str | None]) -> dict[str, object]:
@@ -81,36 +113,19 @@ def _load_inference_runtime() -> dict[str, Any]:
     with DEFAULT_MAPPING_PATH.open("rb") as mapping_file:
         mapping = pickle.load(mapping_file)
 
-    if not isinstance(mapping, dict) or "account_to_idx" not in mapping:
+    if not isinstance(mapping, dict):
         raise ValueError(
             f"Định dạng account mapping không hợp lệ: {DEFAULT_MAPPING_PATH}"
         )
-    account_to_idx = mapping["account_to_idx"]
-    if not isinstance(account_to_idx, dict):
-        raise ValueError(
-            f"account_to_idx trong mapping không phải dictionary: {DEFAULT_MAPPING_PATH}"
-        )
+    account_to_idx = mapping.get("account_to_idx", mapping)
 
     checkpoint = torch.load(
         DEFAULT_CHECKPOINT_PATH, map_location="cpu", weights_only=False
     )
-    if not isinstance(checkpoint, dict):
-        raise ValueError(
-            f"Định dạng checkpoint GraphSAGE không hợp lệ: {DEFAULT_CHECKPOINT_PATH}"
-        )
-    state_dict = checkpoint.get("model_state_dict")
-    if not isinstance(state_dict, dict):
-        raise ValueError(
-            f"Checkpoint không chứa model_state_dict: {DEFAULT_CHECKPOINT_PATH}"
-        )
+    state_dict = checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint
 
-    in_channels = int(checkpoint.get("in_channels", graph.x.shape[1]))
-    hidden_channels = int(checkpoint.get("hidden_channels", 64))
-    if graph.x.shape[1] != in_channels:
-        raise ValueError(
-            "Số chiều node feature không khớp checkpoint: "
-            f"graph={graph.x.shape[1]}, checkpoint={in_channels}"
-        )
+    in_channels = int(checkpoint.get("in_channels", graph.x.shape[1])) if isinstance(checkpoint, dict) else graph.x.shape[1]
+    hidden_channels = int(checkpoint.get("hidden_channels", 64)) if isinstance(checkpoint, dict) else 64
 
     model = FraudDetectionGNN(
         in_channels=in_channels,
@@ -133,111 +148,99 @@ def _load_inference_runtime() -> dict[str, Any]:
     return _INFERENCE_RUNTIME
 
 
-def infer_transaction(
-    tx_json: str,
+def infer_processed_transaction(
+    processed_tx: ProcessedTransaction,
     threshold: float = DEFAULT_THRESHOLD,
 ) -> dict[str, object]:
-    """Dự đoán một giao dịch bằng GraphSAGE trên graph train.
-
-    ``tx_json`` phải chứa ``Sender_account`` và ``Receiver_account``. Graph
-    train được dùng làm ngữ cảnh để không dùng giao dịch tương lai khi mô
-    phỏng streaming.
-    """
-    if not 0.0 <= threshold <= 1.0 or not math.isfinite(threshold):
-        raise ValueError("threshold phải là số hữu hạn trong khoảng [0, 1]")
-
-    try:
-        transaction = json.loads(tx_json)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"tx_json không phải JSON hợp lệ: {exc.msg}") from exc
-    if not isinstance(transaction, dict):
-        raise ValueError("tx_json phải mã hóa một JSON object")
-
-    required_fields = ("Sender_account", "Receiver_account")
-    missing_fields = [field for field in required_fields if field not in transaction]
-    if missing_fields:
-        raise ValueError(
-            "Giao dịch thiếu trường bắt buộc: " + ", ".join(missing_fields)
-        )
-
-    try:
-        sender_account = int(transaction["Sender_account"])
-        receiver_account = int(transaction["Receiver_account"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "Sender_account và Receiver_account phải là số nguyên"
-        ) from exc
-
+    """Dự đoán một giao dịch đã được DataProcessor xử lý."""
     runtime = _load_inference_runtime()
-    account_to_idx = runtime["account_to_idx"]
-    missing_accounts = [
-        account
-        for account in (sender_account, receiver_account)
-        if account not in account_to_idx
-    ]
-    if missing_accounts:
-        unique_missing = dict.fromkeys(missing_accounts)
-        raise ValueError(
-            "Không tìm thấy Account ID trong mapping: "
-            + ", ".join(str(account) for account in unique_missing)
-        )
-
-    sender_idx = int(account_to_idx[sender_account])
-    receiver_idx = int(account_to_idx[receiver_account])
     node_embeddings = runtime["node_embeddings"]
     node_count = int(node_embeddings.size(0))
-    if not 0 <= sender_idx < node_count or not 0 <= receiver_idx < node_count:
-        raise ValueError(
-            "Account mapping trỏ tới node index ngoài phạm vi graph train"
-        )
 
-    edge_embedding = torch.cat(
-        [
-            node_embeddings[sender_idx],
-            node_embeddings[receiver_idx],
-        ],
-        dim=-1,
-    )
+    sender_idx = processed_tx.sender_idx
+    receiver_idx = processed_tx.receiver_idx
+
+    # Xử lý an toàn nếu node_idx ngoài phạm vi node_embeddings của base train graph
+    if sender_idx >= node_count:
+        sender_emb = torch.zeros(node_embeddings.shape[1], dtype=torch.float32)
+    else:
+        sender_emb = node_embeddings[sender_idx]
+
+    if receiver_idx >= node_count:
+        receiver_emb = torch.zeros(node_embeddings.shape[1], dtype=torch.float32)
+    else:
+        receiver_emb = node_embeddings[receiver_idx]
+
+    edge_embedding = torch.cat([sender_emb, receiver_emb], dim=-1)
+
     with torch.no_grad():
         logit = runtime["classifier"](edge_embedding)
         probability = float(torch.sigmoid(logit).reshape(-1)[0].item())
 
     return {
-        "sender_account": sender_account,
-        "receiver_account": receiver_account,
+        "sender_account": processed_tx.sender_account,
+        "receiver_account": processed_tx.receiver_account,
         "fraud_probability": probability,
         "is_fraud": probability >= threshold,
         "threshold": threshold,
     }
 
 
+def infer_transaction(
+    tx_json: str,
+    threshold: float = DEFAULT_THRESHOLD,
+) -> dict[str, object]:
+    """Hàm tương thích ngược với API cũ."""
+    processor = get_data_processor()
+    processed_tx = processor.process_json(tx_json)
+    return infer_processed_transaction(processed_tx, threshold=threshold)
+
+
 def process_transaction(
     row: dict[str, str | None],
     verbose: bool = False,
-) -> tuple[str, float]:
-    """Phân tích, chuyển một dòng CSV thành JSON và trả về JSON cùng độ trễ."""
-    start_time = time.perf_counter()
+) -> tuple[str, float, float, float]:
+    """
+    Xử lý giao dịch qua pipeline 2 bước:
+      Bước 1: Data Processing (DataProcessor)
+      Bước 2: GraphSAGE Inference
+    
+    Returns:
+      (tx_json, data_proc_latency, inference_latency, total_latency)
+    """
+    processor = get_data_processor()
+
+    # Bước 1: Data Processing & Feature Extraction
+    t0 = time.perf_counter()
     parsed_row = parse_row(row)
+    processed_tx = processor.process_transaction(parsed_row)
+    t1 = time.perf_counter()
+    data_proc_latency = t1 - t0
+
+    # Bước 2: Model Inference
+    inference = infer_processed_transaction(processed_tx)
+    t2 = time.perf_counter()
+    inference_latency = t2 - t1
+
+    total_latency = data_proc_latency + inference_latency
     tx_json = json.dumps(parsed_row, ensure_ascii=False)
-    inference = infer_transaction(tx_json)
-    end_time = time.perf_counter()
-    latency = end_time - start_time
+
     if verbose:
         print(
-            "Kết quả GraphSAGE: "
-            f"fraud_probability={inference['fraud_probability']:.6f}, "
-            f"is_fraud={inference['is_fraud']}"
+            f"Kết quả GraphSAGE: fraud_prob={inference['fraud_probability']:.4f}, "
+            f"is_fraud={inference['is_fraud']} | "
+            f"DataProc={data_proc_latency*1000:.3f}ms, Infer={inference_latency*1000:.3f}ms, "
+            f"Total={total_latency*1000:.3f}ms"
         )
-    return tx_json, latency
+
+    return tx_json, data_proc_latency, inference_latency, total_latency
 
 
 def _repository_root() -> Path:
-    """Trả về thư mục gốc repository dựa trên vị trí của script."""
     return Path(__file__).resolve().parent.parent
 
 
 def _resolve_file_path(file_path: str | Path) -> Path:
-    """Phân giải đường dẫn đầu vào tương đối từ thư mục gốc repository."""
     path = Path(file_path)
     return path if path.is_absolute() else _repository_root() / path
 
@@ -246,7 +249,6 @@ def _validate_row(
     row: dict[str | None, str | None],
     fieldnames: list[str],
 ) -> dict[str, str | None]:
-    """Từ chối các dòng có cấu trúc CSV không khớp với header."""
     if None in row:
         raise ValueError("Dòng chứa nhiều trường hơn số cột trong header")
 
@@ -265,12 +267,25 @@ def load_and_simulate_transactions(
     file_path: str | Path,
     limit: int | None = None,
     verbose: bool = False,
-) -> tuple[list[float], int, int, float]:
-    """Đọc tuần tự giao dịch từ CSV và thu thập số liệu xử lý."""
+) -> tuple[list[float], list[float], list[float], int, int, float]:
+    """
+    Đọc tuần tự giao dịch từ CSV và thu thập số liệu chi tiết về độ trễ.
+    
+    Returns:
+        (total_latencies, data_proc_latencies, inference_latencies, total_rows, error_rows, total_time)
+    """
     if limit is not None and limit <= 0:
         raise ValueError("limit phải lớn hơn 0")
 
-    latencies: list[float] = []
+    # Warmup runtime trước khi đo đạc để loại bỏ cold-start overhead
+    print("Khởi động môi trường suy luận (Warming up inference runtime & DataProcessor)...")
+    _load_inference_runtime()
+    get_data_processor()
+
+    total_latencies: list[float] = []
+    data_proc_latencies: list[float] = []
+    inference_latencies: list[float] = []
+
     total_rows = 0
     error_rows = 0
     start_time = time.perf_counter()
@@ -290,11 +305,12 @@ def load_and_simulate_transactions(
             if len(set(fieldnames)) != len(fieldnames):
                 raise ValueError("header CSV chứa tên cột trùng lặp")
 
+            print(f"Bắt đầu luồng kiểm thử Streaming từ {resolved_path.name}...")
             for raw_row in reader:
                 total_rows += 1
                 try:
                     row = _validate_row(raw_row, fieldnames)
-                    tx_json, latency = process_transaction(row, verbose=verbose)
+                    tx_json, d_lat, i_lat, t_lat = process_transaction(row, verbose=verbose)
                 except (TypeError, ValueError, json.JSONDecodeError) as exc:
                     error_rows += 1
                     print(
@@ -305,11 +321,14 @@ def load_and_simulate_transactions(
                         break
                     continue
 
-                latencies.append(latency)
-                if verbose and len(latencies) <= MAX_VERBOSE_ROWS:
+                data_proc_latencies.append(d_lat)
+                inference_latencies.append(i_lat)
+                total_latencies.append(t_lat)
+
+                if verbose and len(total_latencies) <= MAX_VERBOSE_ROWS:
                     print(
-                        f"Giao dịch {len(latencies)}: "
-                        f"{tx_json} (độ trễ={latency * 1000:.3f} ms)"
+                        f"Giao dịch {len(total_latencies)}: "
+                        f"(DataProc={d_lat*1000:.3f}ms, Infer={i_lat*1000:.3f}ms -> Total={t_lat*1000:.3f}ms)"
                     )
                 if limit is not None and total_rows >= limit:
                     break
@@ -334,42 +353,77 @@ def load_and_simulate_transactions(
         )
 
     total_time = time.perf_counter() - start_time
-    return latencies, total_rows, error_rows, total_time
+    return total_latencies, data_proc_latencies, inference_latencies, total_rows, error_rows, total_time
 
 
 def print_summary(
-    latencies: list[float],
+    total_latencies: list[float],
+    data_proc_latencies: list[float],
+    inference_latencies: list[float],
     total_rows: int,
     error_rows: int,
     total_time: float,
 ) -> None:
-    """In thống kê xử lý giao dịch và hiệu năng."""
-    successful_rows = len(latencies)
-    print("\nTóm tắt mô phỏng")
-    print(f"Tổng số dòng đã đọc: {total_rows}")
-    print(f"Số giao dịch thành công: {successful_rows}")
-    print(f"Số dòng lỗi/bỏ qua: {error_rows}")
-    print(f"Tổng thời gian chạy: {total_time * 1000:.3f} ms")
+    """In thống kê phân rã độ trễ và đánh giá tiêu chuẩn SLA (< 100ms)."""
+    successful_rows = len(total_latencies)
+    print("\n" + "=" * 65)
+    print("BÁO CÁO KẾT QUẢ KIỂM THỬ ĐỘ TRỄ TOÀN TRÌNH (STREAMING E2E)")
+    print("=" * 65)
+    print(f"Tổng số dòng đã nạp     : {total_rows:,}")
+    print(f"Số giao dịch thành công : {successful_rows:,}")
+    print(f"Số dòng lỗi/bỏ qua      : {error_rows:,}")
+    print(f"Tổng thời gian mô phỏng : {total_time * 1000:.2f} ms")
 
-    if not latencies:
-        print("Độ trễ trung bình: N/A")
-        print("Độ trễ nhỏ nhất: N/A")
-        print("Độ trễ lớn nhất: N/A")
-        print("Độ lệch chuẩn: N/A")
+    if not total_latencies:
+        print("Không có dữ liệu đo đạc hợp lệ.")
         return
 
-    latency_ms = [latency * 1000 for latency in latencies]
-    standard_deviation = (
-        statistics.stdev(latency_ms) if len(latency_ms) > 1 else 0.0
-    )
-    print(f"Độ trễ trung bình: {statistics.mean(latency_ms):.3f} ms")
-    print(f"Độ trễ nhỏ nhất: {min(latency_ms):.3f} ms")
-    print(f"Độ trễ lớn nhất: {max(latency_ms):.3f} ms")
-    print(f"Độ lệch chuẩn: {standard_deviation:.3f} ms")
+    def _stats(lats: list[float]) -> dict[str, float]:
+        ms = np.array(lats) * 1000.0
+        return {
+            "mean": float(np.mean(ms)),
+            "std": float(np.std(ms)) if len(ms) > 1 else 0.0,
+            "min": float(np.min(ms)),
+            "p50": float(np.percentile(ms, 50)),
+            "p95": float(np.percentile(ms, 95)),
+            "p99": float(np.percentile(ms, 99)),
+            "max": float(np.max(ms)),
+        }
+
+    d_stats = _stats(data_proc_latencies)
+    i_stats = _stats(inference_latencies)
+    t_stats = _stats(total_latencies)
+
+    print("\n1. ĐỘ TRỄ DATA PROCESSING (Thành viên 1 - DataProcessor):")
+    print(f"   - Trung bình (Mean) : {d_stats['mean']:.4f} ms")
+    print(f"   - Trung vị (P50)    : {d_stats['p50']:.4f} ms")
+    print(f"   - Phân vị P95       : {d_stats['p95']:.4f} ms")
+    print(f"   - Phân vị P99       : {d_stats['p99']:.4f} ms")
+    print(f"   - Nhỏ nhất / Lớn nhất: {d_stats['min']:.4f} ms / {d_stats['max']:.4f} ms")
+
+    print("\n2. ĐỘ TRỄ GRAPHSAGE INFERENCE (Thành viên 2/3):")
+    print(f"   - Trung bình (Mean) : {i_stats['mean']:.4f} ms")
+    print(f"   - Trung vị (P50)    : {i_stats['p50']:.4f} ms")
+    print(f"   - Phân vị P95       : {i_stats['p95']:.4f} ms")
+    print(f"   - Phân vị P99       : {i_stats['p99']:.4f} ms")
+    print(f"   - Nhỏ nhất / Lớn nhất: {i_stats['min']:.4f} ms / {i_stats['max']:.4f} ms")
+
+    print("\n3. TỔNG ĐỘ TRỄ TOÀN TRÌNH (END-TO-END LATENCY):")
+    print(f"   - Trung bình (Mean) : {t_stats['mean']:.4f} ms")
+    print(f"   - Trung vị (P50)    : {t_stats['p50']:.4f} ms")
+    print(f"   - Phân vị P95       : {t_stats['p95']:.4f} ms")
+    print(f"   - Phân vị P99       : {t_stats['p99']:.4f} ms")
+    print(f"   - Nhỏ nhất / Lớn nhất: {t_stats['min']:.4f} ms / {t_stats['max']:.4f} ms")
+
+    sla_target = 100.0  # ms
+    is_sla_met = t_stats["p99"] < sla_target
+    status_str = "ĐẠT CHUẨN KỸ THUẬT (< 100ms)" if is_sla_met else "CẢNH BÁO: VƯỢT QUÁ SLA"
+    print("\n" + "-" * 65)
+    print(f"KẾT LUẬN TIÊU CHUẨN SLA (P99 < {sla_target}ms): {status_str} [P99 = {t_stats['p99']:.2f}ms]")
+    print("-" * 65)
 
 
 def _positive_int(value: str) -> int:
-    """Phân tích giá trị số nguyên dương cho argparse."""
     try:
         parsed_value = int(value)
     except ValueError as exc:
@@ -380,14 +434,13 @@ def _positive_int(value: str) -> int:
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
-    """Tạo bộ phân tích tham số dòng lệnh."""
     parser = argparse.ArgumentParser(
         description="Đọc tuần tự giao dịch CSV qua pipeline kiểm thử thời gian thực."
     )
     parser.add_argument(
         "--file_path",
         default=str(DEFAULT_FILE_PATH),
-        help="đường dẫn tệp CSV đầu vào (mặc định: data/test_cleaned.csv)",
+        help="đường dẫn tệp CSV đầu vào (mặc định: data/processed/test_cleaned.csv)",
     )
     parser.add_argument(
         "--limit",
@@ -404,7 +457,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """Phân tích tham số, chạy mô phỏng và in phần tóm tắt."""
     args = build_argument_parser().parse_args()
     try:
         metrics = load_and_simulate_transactions(
