@@ -47,6 +47,7 @@ from torch_geometric.utils import k_hop_subgraph, subgraph, to_undirected
 
 from src.data_processor import DataProcessor, ProcessedTransaction
 from src.gnn_explainer import FraudGNNExplainer
+from src.reason_codes import ReasonCodeGenerator
 from src.models.gnn_model import FraudDetectionGNN
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -73,6 +74,7 @@ MAX_VERBOSE_ROWS = 10
 _INFERENCE_RUNTIME: dict[str, Any] | None = None
 _DATA_PROCESSOR: DataProcessor | None = None
 _XAI_EXPLAINER: FraudGNNExplainer | None = None
+_REASON_CODE_GENERATOR = ReasonCodeGenerator()
 
 
 def get_data_processor() -> DataProcessor:
@@ -324,6 +326,16 @@ def infer_processed_transaction(
                     num_hops=xai_num_hops,
                 )
                 explanation = _explain_transaction(sub_data, epochs=xai_epochs)
+                reason_codes = _REASON_CODE_GENERATOR.generate(
+                    explanation,
+                    subgraph=sub_data,
+                    transaction_features={
+                        **processed_tx.feature_dict,
+                        "is_new_sender": processed_tx.is_new_sender,
+                        "is_new_receiver": processed_tx.is_new_receiver,
+                    },
+                )
+                explanation["reason_codes"] = reason_codes
                 if xai_output_path is not None:
                     FraudGNNExplainer.save_explanation(
                         explanation,
@@ -332,6 +344,7 @@ def infer_processed_transaction(
                     )
                     result["xai_output_path"] = str(xai_output_path)
                 result["explanation"] = explanation
+                result["reason_codes"] = reason_codes
         except Exception as exc:
             result["xai_error"] = str(exc)
 

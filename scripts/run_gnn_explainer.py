@@ -19,6 +19,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from src.gnn_explainer import FraudGNNExplainer
+from src.reason_codes import ReasonCodeGenerator
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,6 +58,7 @@ def main() -> None:
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_rows: list[dict[str, object]] = []
+    reason_code_generator = ReasonCodeGenerator()
     success = 0
     for index, source_path in enumerate(files, 1):
         output_path = args.output_dir / f"explanation_{source_path.stem}.pt"
@@ -66,6 +68,10 @@ def main() -> None:
         }
         try:
             result = explainer.explain_file(source_path, output_path)
+            sub_data = torch.load(source_path, map_location="cpu", weights_only=False)
+            reason_codes = reason_code_generator.generate(result, sub_data)
+            result["reason_codes"] = reason_codes
+            FraudGNNExplainer.save_explanation(result, output_path, source_subgraph=source_path)
             row.update(
                 {
                     "num_nodes": int(result["node_importance"].numel()),
@@ -77,6 +83,10 @@ def main() -> None:
                     "target_edge_idx_in_sub": result["target_edge_idx_in_sub"],
                     "max_edge_importance": float(result["edge_mask"].abs().max()),
                     "max_node_importance": float(result["node_importance"].max()),
+                    "reason_codes": "|".join(
+                        item["code"] for item in reason_codes["reason_codes"]
+                    ),
+                    "explanation_status": reason_codes["explanation_status"],
                     "status": "success",
                     "error_message": "",
                 }
