@@ -227,3 +227,15 @@ venv/
 *.pt
 __pycache__/
 .vscode/
+
+# Project datasets & large artifacts
+data/raw/
+data/processed/*.csv
+data/processed/*.pt
+*.pth
+*.pt
+venv/
+*.pt
+__pycache__/
+.vscode/
+data/processed/subgraphs_manifest.csv
