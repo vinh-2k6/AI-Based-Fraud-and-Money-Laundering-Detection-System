@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -31,6 +32,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--reason-codes-dir",
+        type=Path,
+        default=Path("data/processed/reason_codes"),
+    )
     return parser.parse_args()
 
 
@@ -57,6 +64,7 @@ def main() -> None:
         lr=args.lr,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    args.reason_codes_dir.mkdir(parents=True, exist_ok=True)
     manifest_rows: list[dict[str, object]] = []
     reason_code_generator = ReasonCodeGenerator()
     success = 0
@@ -72,6 +80,21 @@ def main() -> None:
             reason_codes = reason_code_generator.generate(result, sub_data)
             result["reason_codes"] = reason_codes
             FraudGNNExplainer.save_explanation(result, output_path, source_subgraph=source_path)
+            transaction_id = (
+                f"edge_{result['metadata'].get('target_edge_idx_global', source_path.stem)}"
+            )
+            reason_document = reason_code_generator.build_document(
+                result,
+                subgraph=sub_data,
+                transaction_id=transaction_id,
+                threshold=args.threshold,
+                top_k=5,
+            )
+            reason_code_path = args.reason_codes_dir / f"transaction_{transaction_id}.json"
+            reason_code_path.write_text(
+                json.dumps(reason_document, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
             row.update(
                 {
                     "num_nodes": int(result["node_importance"].numel()),
@@ -87,6 +110,7 @@ def main() -> None:
                         item["code"] for item in reason_codes["reason_codes"]
                     ),
                     "explanation_status": reason_codes["explanation_status"],
+                    "reason_code_json": str(reason_code_path),
                     "status": "success",
                     "error_message": "",
                 }

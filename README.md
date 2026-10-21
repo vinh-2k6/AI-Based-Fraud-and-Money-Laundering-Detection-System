@@ -321,6 +321,43 @@ python -m unittest discover tests
 
 ---
 
+## 6.1. Reason Code và báo cáo Gemini tùy chọn
+
+Sau khi chạy GNNExplainer, hệ thống xuất reason code JSON cục bộ:
+
+```powershell
+python scripts\run_gnn_explainer.py `
+  --checkpoint data\processed\graphsage_model.pt `
+  --subgraphs-dir data\processed\subgraphs `
+  --output-dir data\processed\xai_explanations
+```
+
+Reason code được lưu tại `data\processed\reason_codes\transaction_<id>.json`.
+Các mã này do `ReasonCodeGenerator` sinh từ xác suất model, metadata graph và
+mask của GNNExplainer; chúng không phải kết luận pháp lý.
+
+Gemini chỉ được gọi khi chạy script riêng:
+
+```powershell
+$env:GEMINI_API_KEY = "your-key"
+$env:GEMINI_MODEL = "gemini-3.6-flash"
+python scripts\generate_transaction_reports.py `
+  --input-dir data\processed\reason_codes `
+  --output-dir data\processed\transaction_reports `
+  --top-k 5 `
+  --max-prompt-chars 12000
+```
+
+Có thể dùng `--force` để bỏ qua cache. Mặc định pipeline GraphSAGE/XAI không
+gọi Gemini. Payload gửi ra ngoài chỉ chứa dữ liệu đã lọc, giới hạn kích thước
+và ẩn danh account/transaction ID; không gửi tensor hoặc toàn bộ graph. Không
+đặt API key trong source code, commit hoặc log. Cần đánh giá quyền riêng tư,
+chi phí API và phê duyệt việc gửi dữ liệu tới dịch vụ bên ngoài trước khi dùng
+production.
+
+Nếu Gemini lỗi hoặc thiếu `GEMINI_API_KEY`, reason code gốc vẫn được giữ lại và
+batch tiếp tục xử lý file khác.
+
 ## 7. Phân tích Case Study Rửa tiền Thực tế (Real-world AML Case Studies)
 
 Dưới đây là 3 mẫu đồ thị con điển hình được trích xuất và giải thích trực quan bởi hệ thống:
@@ -357,5 +394,4 @@ Dự án được xây dựng và phối hợp hoàn thiện qua 6 tuần bởi 
 | **Lưu Việt Dũng** (`24021430`) | **MLOps & Reporter** | • Xây dựng hệ thống suy luận thời gian thực (`simulate_realtime.py`) tích hợp XAI on-the-fly.<br>• Xây dựng kịch bản kiểm thử đánh giá đối chuẩn (`evaluate.py`), đo kiểm độ trễ toàn trình End-to-End.<br>• Tổng hợp số liệu, xuất báo cáo kỹ thuật và slide bảo vệ dự án. |
 
 ---
-
 

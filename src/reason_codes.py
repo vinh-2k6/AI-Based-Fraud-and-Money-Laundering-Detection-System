@@ -176,3 +176,65 @@ class ReasonCodeGenerator:
             "normalization": "abs(mask) / max(abs(mask)) within subgraph",
             "min_score": self.min_score,
         }
+
+    def build_document(
+        self,
+        explanation: Mapping[str, Any],
+        subgraph: Data | None = None,
+        transaction_features: Mapping[str, Any] | None = None,
+        transaction_id: str | None = None,
+        threshold: float = 0.5,
+        top_k: int = 5,
+    ) -> dict[str, Any]:
+        """Build the small, JSON-safe contract consumed by report generation."""
+        if top_k <= 0:
+            raise ValueError("top_k phải lớn hơn 0")
+        result = self.generate(explanation, subgraph, transaction_features)
+        metadata = self._metadata(explanation, subgraph)
+        edge_scores = self._normalized(explanation["edge_mask"])
+        node_scores = self._normalized(explanation["node_importance"])
+        top_edges = [
+            {
+                "index": index,
+                "importance": round(float(score), 6),
+                "nodes": list(pair) if (pair := self._edge_nodes(subgraph, index)) else None,
+            }
+            for index, score in sorted(
+                enumerate(edge_scores.tolist()), key=lambda item: item[1], reverse=True
+            )[:top_k]
+        ]
+        top_nodes = [
+            {"index": index, "importance": round(float(score), 6)}
+            for index, score in sorted(
+                enumerate(node_scores.tolist()), key=lambda item: item[1], reverse=True
+            )[:top_k]
+        ]
+        probability = result["fraud_probability"]
+        return {
+            "transaction_id": transaction_id
+            or f"edge_{metadata.get('target_edge_idx_global', 'unknown')}",
+            "prediction": {
+                "label": "fraud" if probability is None or float(probability) >= threshold else "not_fraud",
+                "fraud_probability": probability,
+                "threshold": threshold,
+            },
+            "transaction": dict(transaction_features or {}),
+            "reason_codes": [
+                {
+                    "code": item["code"],
+                    "description": item["label"],
+                    "importance": item["score"],
+                    "value": None,
+                    "source": "model_or_gnnexplainer",
+                }
+                for item in result["reason_codes"][:top_k]
+            ],
+            "explanation": {"top_edges": top_edges, "top_nodes": top_nodes, "top_k": top_k},
+            "graph_context": {
+                "num_nodes": int(metadata.get("num_nodes", subgraph.num_nodes if subgraph else 0)),
+                "num_edges": int(metadata.get("num_edges", subgraph.edge_index.shape[1] if subgraph else 0)),
+                "num_hops": int(metadata.get("num_hops", 0)),
+                "num_fraud_edges": int(metadata.get("num_fraud_edges", 0)),
+            },
+            "explanation_status": result["explanation_status"],
+        }

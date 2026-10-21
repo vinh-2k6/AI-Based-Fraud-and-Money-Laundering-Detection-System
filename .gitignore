@@ -239,3 +239,9 @@ venv/
 __pycache__/
 .vscode/
 data/processed/subgraphs_manifest.csv
+
+# Generated transaction explanations and reports
+data/processed/reason_codes/
+data/processed/transaction_reports/
+data/processed/subgraphs/
+data/processed/xai_explanations/
