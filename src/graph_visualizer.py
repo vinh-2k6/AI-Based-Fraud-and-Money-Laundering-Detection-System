@@ -20,6 +20,7 @@ import matplotlib
 matplotlib.use("Agg")  # Chế độ headless, lưu ảnh trực tiếp không cần mở cửa sổ GUI
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+import matplotlib.lines as mlines
 import networkx as nx
 import numpy as np
 import torch
@@ -86,6 +87,50 @@ class SubgraphXaiVisualizer:
         s = str(account_id)
         return s if len(s) <= max_len else f"{s[:4]}..{s[-3:]}"
 
+    @staticmethod
+    def _normalize_edge_importance(
+        edge_mask: torch.Tensor | np.ndarray | None,
+        num_edges: int,
+    ) -> np.ndarray:
+        if edge_mask is None:
+            return np.zeros(num_edges, dtype=np.float32)
+        values = (
+            edge_mask.detach().cpu().numpy()
+            if isinstance(edge_mask, torch.Tensor)
+            else np.asarray(edge_mask)
+        )
+        values = np.asarray(values, dtype=np.float32).reshape(-1)
+        if values.size != num_edges:
+            print(
+                f"[Visualizer] Cảnh báo edge_mask có {values.size} phần tử, "
+                f"cần {num_edges}; dùng importance mặc định."
+            )
+            return np.zeros(num_edges, dtype=np.float32)
+        values = np.nan_to_num(np.abs(values), nan=0.0, posinf=0.0, neginf=0.0)
+        maximum = float(values.max()) if values.size else 0.0
+        if maximum <= 0.0:
+            return np.zeros(num_edges, dtype=np.float32)
+        return np.clip(values / maximum, 0.0, 1.0)
+
+    @staticmethod
+    def _get_edge_labels(sub_data: Data, num_edges: int) -> np.ndarray | None:
+        labels = getattr(sub_data, "y", None)
+        if labels is None:
+            print("[Visualizer] Cảnh báo subgraph không có y; dùng màu fallback cho cạnh.")
+            return None
+        if isinstance(labels, torch.Tensor):
+            values = labels.detach().cpu().numpy()
+        else:
+            values = np.asarray(labels)
+        values = np.asarray(values).reshape(-1)
+        if values.size != num_edges:
+            print(
+                f"[Visualizer] Cảnh báo y có {values.size} phần tử, "
+                f"cần {num_edges}; dùng màu fallback cho cạnh."
+            )
+            return None
+        return values
+
     # 2. CHUYỂN ĐỔI PYG SANG NETWORKX VÀ VẼ ĐỒ THỊ
     def plot_subgraph_explanation(
         self,
@@ -99,28 +144,14 @@ class SubgraphXaiVisualizer:
     ) -> Path:
         """
         Vẽ đồ thị con giải thích bằng NetworkX và Matplotlib.
-        Làm nổi bật các cạnh có trọng số edge_mask >= mask_threshold.
+        Màu cạnh lấy từ sub_data.y; edge_mask chỉ điều chỉnh importance và độ dày.
         """
         edge_index = sub_data.edge_index.cpu().numpy()
         num_edges = edge_index.shape[1]
         num_nodes = sub_data.num_nodes
 
-        # Chuẩn bị trọng số edge_mask (nếu chưa có từ TV3, dùng giả lập kiểm thử)
-        if edge_mask is None:
-            edge_weights = np.ones(num_edges, dtype=np.float32) * 0.2
-            target_idx = getattr(sub_data, "target_edge_idx_in_sub", 0)
-            if 0 <= target_idx < num_edges:
-                edge_weights[target_idx] = 0.95
-        else:
-            if isinstance(edge_mask, torch.Tensor):
-                edge_weights = edge_mask.detach().cpu().numpy().astype(np.float32)
-            else:
-                edge_weights = np.asarray(edge_mask, dtype=np.float32)
-            edge_weights = edge_weights.reshape(-1)
-            if edge_weights.size != num_edges:
-                raise ValueError(
-                    f"edge_mask có {edge_weights.size} phần tử, cần {num_edges}"
-                )
+        edge_importance = self._normalize_edge_importance(edge_mask, num_edges)
+        edge_labels = self._get_edge_labels(sub_data, num_edges)
 
         if node_importance is None and hasattr(sub_data, "node_importance"):
             node_importance = sub_data.node_importance
@@ -146,20 +177,32 @@ class SubgraphXaiVisualizer:
             for nid, acc in node_accounts.items()
         }
 
-        # Xây dựng NetworkX DiGraph
-        G = nx.DiGraph()
+        # MultiDiGraph giữ lại cả các giao dịch song song giữa cùng một cặp node.
+        G = nx.MultiDiGraph()
         for i in range(num_nodes):
             G.add_node(i, label=node_labels[i])
 
         target_sub_idx = getattr(sub_data, "target_edge_idx_in_sub", -1)
+        if not isinstance(target_sub_idx, (int, np.integer)) or not 0 <= target_sub_idx < num_edges:
+            target_sub_idx = -1
         for i in range(num_edges):
             u, v = int(edge_index[0, i]), int(edge_index[1, i])
-            w = float(edge_weights[i]) if i < len(edge_weights) else 0.0
-            G.add_edge(u, v, weight=w, is_target=(i == target_sub_idx))
+            G.add_edge(
+                u,
+                v,
+                key=i,
+                edge_index=i,
+                weight=float(edge_importance[i]),
+                label=None if edge_labels is None else int(edge_labels[i] == 1),
+                is_target=(i == target_sub_idx),
+            )
 
         # Phân loại màu cho nút trung tâm (Sender/Receiver mục tiêu)
-        target_u = int(sub_data.target_edge_label_index[0, 0].item()) if hasattr(sub_data, "target_edge_label_index") else 0
-        target_v = int(sub_data.target_edge_label_index[1, 0].item()) if hasattr(sub_data, "target_edge_label_index") else 1
+        target_u, target_v = 0, 1
+        target_index = getattr(sub_data, "target_edge_label_index", None)
+        if isinstance(target_index, torch.Tensor) and target_index.ndim == 2 and target_index.shape[1] > 0:
+            target_u = int(target_index[0, 0].item())
+            target_v = int(target_index[1, 0].item())
 
         node_colors = []
         node_sizes = []
@@ -180,21 +223,35 @@ class SubgraphXaiVisualizer:
                 node_colors.append("#8ecae6")  # Xanh nhạt - Nút thông thường
                 node_sizes.append(450)
 
-        # Phân loại cạnh: Nổi bật (High Mask) vs Cạnh nền (Normal)
-        high_edges = []
-        high_widths = []
-        high_colors = []
-        bg_edges = []
-
-        for u, v, d in G.edges(data=True):
-            w = d.get("weight", 0.0)
-            is_target = d.get("is_target", False)
-            if is_target or w >= mask_threshold:
-                high_edges.append((u, v))
-                high_widths.append(2.0 + w * 3.0)
-                high_colors.append("#d00000" if is_target else "#e85d04")
+        fraud_edges, normal_edges, fallback_edges = [], [], []
+        fraud_widths, normal_widths, fallback_widths = [], [], []
+        fraud_colors, normal_colors, fallback_colors = [], [], []
+        target_edges = []
+        target_colors = []
+        for u, v, key, d in G.edges(keys=True, data=True):
+            importance = float(d["weight"])
+            width = 1.2 + importance * 3.8
+            if d["is_target"]:
+                width += 1.0
+                target_edges.append((u, v, key))
+                if edge_labels is None:
+                    target_colors.append("#e85d04")
+                elif d["label"] == 1:
+                    target_colors.append("#d90429")
+                else:
+                    target_colors.append("#2a9d8f")
+            if edge_labels is None:
+                fallback_edges.append((u, v, key))
+                fallback_widths.append(width)
+                fallback_colors.append("#e85d04" if importance >= mask_threshold else "#adb5bd")
+            elif d["label"] == 1:
+                fraud_edges.append((u, v, key))
+                fraud_widths.append(width)
+                fraud_colors.append("#d90429" if importance >= mask_threshold else "#ef476f")
             else:
-                bg_edges.append((u, v))
+                normal_edges.append((u, v, key))
+                normal_widths.append(width)
+                normal_colors.append("#2a9d8f" if importance >= mask_threshold else "#8ecae6")
 
         # Tính bố cục hiển thị (Spring Layout)
         pos = nx.spring_layout(G, k=1.8 / np.sqrt(max(1, num_nodes)), iterations=70, seed=42)
@@ -203,17 +260,27 @@ class SubgraphXaiVisualizer:
         ax.set_facecolor("#fafafa")
 
         # Vẽ cạnh nền mờ
-        if bg_edges:
+        if fallback_edges:
             nx.draw_networkx_edges(
-                G, pos, edgelist=bg_edges, edge_color="#adb5bd",
-                width=0.8, alpha=0.35, arrows=True, arrowsize=10, ax=ax,
+                G, pos, edgelist=fallback_edges, edge_color=fallback_colors,
+                width=fallback_widths, alpha=0.75, arrows=True, arrowsize=10, ax=ax,
             )
-
-        # Vẽ cạnh nổi bật có trọng số cao
-        if high_edges:
+        if fraud_edges:
             nx.draw_networkx_edges(
-                G, pos, edgelist=high_edges, edge_color=high_colors,
-                width=high_widths, alpha=0.95, arrows=True, arrowsize=16, ax=ax,
+                G, pos, edgelist=fraud_edges, edge_color=fraud_colors,
+                width=fraud_widths, alpha=0.95, arrows=True, arrowsize=16, ax=ax,
+            )
+        if normal_edges:
+            nx.draw_networkx_edges(
+                G, pos, edgelist=normal_edges, edge_color=normal_colors,
+                width=normal_widths, alpha=0.95, arrows=True, arrowsize=16, ax=ax,
+            )
+        if target_edges:
+            nx.draw_networkx_edges(
+                G, pos, edgelist=target_edges, edge_color=target_colors,
+                width=[1.0 + float(G.edges[u, v, key]["weight"]) * 3.8 + 2.0
+                       for u, v, key in target_edges],
+                style="dashed", arrows=True, arrowsize=18, ax=ax,
             )
 
         # Vẽ nút và nhãn
@@ -227,8 +294,13 @@ class SubgraphXaiVisualizer:
             mpatches.Patch(facecolor="#f77f00", label="Tài khoản luân chuyển (Degree > 4)"),
             mpatches.Patch(facecolor="#90be6d", label="Node quan trọng (GNNExplainer)"),
             mpatches.Patch(facecolor="#8ecae6", label="Tài khoản lân cận"),
-            mpatches.Patch(facecolor="#d00000", label=f"Cạnh quan trọng (edge_mask >= {mask_threshold})"),
-            mpatches.Patch(facecolor="#adb5bd", label="Giao dịch bình thường"),
+            mpatches.Patch(facecolor="#ef476f", label="Cạnh fraud (y=1)"),
+            mpatches.Patch(facecolor="#8ecae6", label="Cạnh hợp lệ (y=0)"),
+            mpatches.Patch(facecolor="#2a9d8f", label=f"Hợp lệ importance cao (edge_mask >= {mask_threshold})"),
+            mpatches.Patch(facecolor="#d90429", label=f"Fraud importance cao (edge_mask >= {mask_threshold})"),
+            mpatches.Patch(facecolor="#adb5bd", label="Màu fallback khi thiếu y"),
+            mpatches.Patch(facecolor="none", edgecolor="#333333", label="Nét đứt: target edge"),
+            mlines.Line2D([], [], color="#333333", linewidth=4, label="Nét càng dày = importance cao"),
         ]
         ax.legend(handles=legends, loc="lower right", fontsize=8, framealpha=0.9)
 
@@ -237,7 +309,9 @@ class SubgraphXaiVisualizer:
         dst_acc = meta.get("dst_account", str(target_v))
         ax.set_title(
             f"Đồ thị con giải thích giao dịch nghi vấn (NetworkX XAI)\n"
-            f"Giao dịch: {src_acc} -> {dst_acc} | Nodes: {num_nodes} | Edges: {num_edges}",
+            f"Giao dịch: {src_acc} -> {dst_acc} | Nodes: {num_nodes} | "
+            f"Edges: {num_edges} | Fraud edges: "
+            f"{int(np.sum(edge_labels == 1)) if edge_labels is not None else 'N/A'}",
             fontsize=12, fontweight="bold", color="#1d3557", pad=12,
         )
         ax.axis("off")

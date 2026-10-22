@@ -245,3 +245,4 @@ data/processed/reason_codes/
 data/processed/transaction_reports/
 data/processed/subgraphs/
 data/processed/xai_explanations/
+docs/api_key.md

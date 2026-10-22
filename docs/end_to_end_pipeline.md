@@ -382,6 +382,7 @@ if ($env:GEMINI_API_KEY) { "GEMINI_API_KEY is configured" } else { "GEMINI_API_K
 
 ### 11.2. Chạy reporter
 
+Nếu muốn tự chỉnh yêu cầu của báo cáo:
 ```powershell
 python scripts\generate_transaction_reports.py `
   --input-dir data\processed\reason_codes `
@@ -392,6 +393,15 @@ python scripts\generate_transaction_reports.py `
   --timeout 30 `
   --retry-count 2
 ```
+Tạo báo cáo mặc định:
+```powershell
+python scripts\generate_transaction_reports.py `
+  --input-dir data\processed\reason_codes `
+  --output-dir data\processed\transaction_reports `
+  --limit 1 `
+  --force
+```
+
 
 Các tham số:
 

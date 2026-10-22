@@ -256,6 +256,13 @@ Mỗi `explanation_*.pt` chứa:
 - `metadata`
 - `source_subgraph` khi được lưu qua `save_explanation()`
 
+Visualizer giữ toàn bộ cạnh của subgraph để bảo toàn context. Màu cạnh được
+lấy từ `sub_data.y`: `y=1` là fraud (đỏ), `y=0` là hợp lệ (xanh). `edge_mask`
+không được dùng làm fraud label; nó chỉ điều chỉnh độ dày/độ đậm theo
+importance sau khi chuẩn hóa. Cạnh mục tiêu được vẽ nét đứt nhưng vẫn giữ màu
+theo `y`. Khi thiếu hoặc sai shape của `y`/`edge_mask`, visualizer dùng
+fallback an toàn và ghi cảnh báo.
+
 `manifest.csv` bổ sung số node/cạnh, xác suất dự đoán, nhãn thật, max edge
 importance, max node importance và trạng thái xử lý. Reporter phải lưu liên
 kết giữa Reason Code và các artifact này để điều tra viên có thể dựng lại
