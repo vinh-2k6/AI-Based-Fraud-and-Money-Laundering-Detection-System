@@ -29,6 +29,7 @@ import argparse
 import csv
 import json
 import math
+import os
 from pathlib import Path
 import pickle
 import statistics
@@ -48,6 +49,8 @@ from torch_geometric.utils import k_hop_subgraph, subgraph, to_undirected
 from src.data_processor import DataProcessor, ProcessedTransaction
 from src.gnn_explainer import FraudGNNExplainer
 from src.reason_codes import ReasonCodeGenerator
+from src.gemini_client import GeminiClient
+from src.transaction_reporter import DEFAULT_PROMPT, TransactionReporter
 from src.models.gnn_model import FraudDetectionGNN
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -75,6 +78,9 @@ _INFERENCE_RUNTIME: dict[str, Any] | None = None
 _DATA_PROCESSOR: DataProcessor | None = None
 _XAI_EXPLAINER: FraudGNNExplainer | None = None
 _REASON_CODE_GENERATOR = ReasonCodeGenerator()
+_TRANSACTION_REPORTER: TransactionReporter | None = None
+_LAST_LATENCY_RECORDS: list[dict[str, object]] = []
+_LAST_BENCHMARK_SUMMARY: dict[str, object] = {}
 
 
 def get_data_processor() -> DataProcessor:
@@ -300,9 +306,11 @@ def infer_processed_transaction(
 
     edge_embedding = torch.cat([sender_emb, receiver_emb], dim=-1)
 
+    graphsage_start = time.perf_counter()
     with torch.no_grad():
         logit = runtime["classifier"](edge_embedding)
         probability = float(torch.sigmoid(logit).reshape(-1)[0].item())
+    graphsage_ms = (time.perf_counter() - graphsage_start) * 1000.0
 
     is_fraud = probability >= threshold
     result: dict[str, object] = {
@@ -312,12 +320,20 @@ def infer_processed_transaction(
         "is_fraud": is_fraud,
         "threshold": threshold,
         "is_cold_start": processed_tx.is_new_sender or processed_tx.is_new_receiver,
+        "latency_breakdown": {
+            "graphsage_inference_ms": graphsage_ms,
+            "xai_subgraph_ms": 0.0,
+            "gnnexplainer_ms": 0.0,
+            "reason_code_ms": 0.0,
+            "explanation_generated": False,
+        },
     }
 
     # Kích hoạt GNNExplainer khi phát hiện gian lận và được yêu cầu
     if is_fraud and enable_xai:
         try:
             if sender_idx < node_count and receiver_idx < node_count:
+                subgraph_start = time.perf_counter()
                 sub_data = _build_transaction_subgraph(
                     graph=runtime["graph"],
                     sender_idx=sender_idx,
@@ -325,7 +341,16 @@ def infer_processed_transaction(
                     account_to_idx=runtime["account_to_idx"],
                     num_hops=xai_num_hops,
                 )
+                breakdown = result["latency_breakdown"]
+                breakdown["xai_subgraph_ms"] = (
+                    time.perf_counter() - subgraph_start
+                ) * 1000.0
+                explainer_start = time.perf_counter()
                 explanation = _explain_transaction(sub_data, epochs=xai_epochs)
+                breakdown["gnnexplainer_ms"] = (
+                    time.perf_counter() - explainer_start
+                ) * 1000.0
+                reason_start = time.perf_counter()
                 reason_codes = _REASON_CODE_GENERATOR.generate(
                     explanation,
                     subgraph=sub_data,
@@ -335,6 +360,10 @@ def infer_processed_transaction(
                         "is_new_receiver": processed_tx.is_new_receiver,
                     },
                 )
+                breakdown["reason_code_ms"] = (
+                    time.perf_counter() - reason_start
+                ) * 1000.0
+                breakdown["explanation_generated"] = True
                 explanation["reason_codes"] = reason_codes
                 if xai_output_path is not None:
                     FraudGNNExplainer.save_explanation(
@@ -379,6 +408,10 @@ def process_transaction(
     xai_epochs: int = DEFAULT_XAI_EPOCHS,
     xai_num_hops: int = 2,
     xai_output_dir: Path | None = None,
+    mode: str = "latency",
+    reporter: TransactionReporter | None = None,
+    report_dir: Path | None = None,
+    force_report: bool = False,
 ) -> tuple[str, float, float, float, dict[str, Any]]:
     """
     Xử lý giao dịch qua pipeline 2 bước:
@@ -416,6 +449,60 @@ def process_transaction(
     )
     t2 = time.perf_counter()
     inference_latency = t2 - t1
+    breakdown = inference["latency_breakdown"]
+    breakdown["data_processing_ms"] = data_proc_latency * 1000.0
+    breakdown["total_model_xai_ms"] = (data_proc_latency + inference_latency) * 1000.0
+    breakdown["gemini_called"] = False
+    breakdown["gemini_report_ms"] = 0.0
+    breakdown["total_with_gemini_ms"] = breakdown["total_model_xai_ms"]
+    breakdown["report_generated"] = False
+
+    if mode not in {"latency", "gemini-report"}:
+        raise ValueError("mode phải là 'latency' hoặc 'gemini-report'")
+
+    if mode == "gemini-report" and inference.get("is_fraud") is True:
+        explanation = inference.get("explanation")
+        reason_codes = inference.get("reason_codes")
+        if explanation is not None and reason_codes is not None and reporter is not None:
+            report_start = time.perf_counter()
+            transaction_id = (
+                f"{parsed_row.get('Sender_account', 'unknown')}_"
+                f"{parsed_row.get('Receiver_account', 'unknown')}"
+            )
+            try:
+                document = _REASON_CODE_GENERATOR.build_document(
+                    explanation,
+                    transaction_features={
+                        **processed_tx.feature_dict,
+                        "is_new_sender": processed_tx.is_new_sender,
+                        "is_new_receiver": processed_tx.is_new_receiver,
+                    },
+                    transaction_id=transaction_id,
+                    top_k=reporter.top_k,
+                )
+                report_result = reporter.report_document(
+                    document,
+                    report_dir or DEFAULT_XAI_OUTPUT_DIR.parent / "transaction_reports",
+                    force=force_report,
+                )
+                inference["report_status"] = report_result.get("status", "unknown")
+                inference["report_generated"] = report_result.get("status") == "success"
+                if report_result.get("status") == "failed":
+                    inference["gemini_error"] = report_result.get("error_type", "report_failed")
+                breakdown["gemini_called"] = report_result.get("status") != "skipped"
+                breakdown["report_generated"] = inference["report_generated"]
+            except Exception as exc:
+                inference["gemini_error"] = str(exc)
+                inference["report_status"] = "failed"
+            finally:
+                breakdown["gemini_report_ms"] = (
+                    time.perf_counter() - report_start
+                ) * 1000.0
+                breakdown["total_with_gemini_ms"] = (
+                    breakdown["total_model_xai_ms"] + breakdown["gemini_report_ms"]
+                )
+        elif inference.get("xai_error"):
+            inference["report_status"] = "skipped_xai_error"
 
     total_latency = data_proc_latency + inference_latency
     tx_json = json.dumps(parsed_row, ensure_ascii=False)
@@ -469,6 +556,20 @@ def load_and_simulate_transactions(
     xai_epochs: int = DEFAULT_XAI_EPOCHS,
     xai_num_hops: int = 2,
     xai_output_dir: str | Path | None = None,
+    metrics_output: str | Path | None = None,
+    summary_output: str | Path | None = None,
+    warmup_runs: int = 0,
+    include_cold_start: bool = False,
+    latency_plot_output: str | Path | None = None,
+    mode: str = "latency",
+    gemini_model: str | None = None,
+    gemini_timeout: float = 30.0,
+    gemini_retry_count: int = 2,
+    report_dir: str | Path | None = None,
+    prompt_file: str | Path | None = None,
+    top_k: int = 5,
+    max_prompt_chars: int = 12000,
+    force_report: bool = False,
 ) -> tuple[list[float], list[float], list[float], int, int, float]:
     """
     Đọc tuần tự giao dịch từ CSV và thu thập số liệu chi tiết về độ trễ.
@@ -478,14 +579,38 @@ def load_and_simulate_transactions(
     """
     if limit is not None and limit <= 0:
         raise ValueError("limit phải lớn hơn 0")
+    if warmup_runs < 0:
+        raise ValueError("warmup_runs không được âm")
+    if mode not in {"latency", "gemini-report"}:
+        raise ValueError("mode phải là 'latency' hoặc 'gemini-report'")
+
+    reporter = None
+    if mode == "gemini-report":
+        reporter = TransactionReporter(
+            GeminiClient(
+                model=gemini_model,
+                timeout=gemini_timeout,
+                retry_count=gemini_retry_count,
+            ),
+            prompt_file=prompt_file or DEFAULT_PROMPT,
+            top_k=top_k,
+            max_prompt_chars=max_prompt_chars,
+        )
 
     print("Khởi động môi trường suy luận (Warming up inference runtime & DataProcessor)...")
-    _load_inference_runtime()
+    runtime = _load_inference_runtime()
     get_data_processor()
+    for _ in range(warmup_runs):
+        embeddings = runtime["node_embeddings"]
+        if embeddings.size(0) >= 2:
+            warmup_embedding = torch.cat((embeddings[0], embeddings[1]), dim=-1)
+            with torch.no_grad():
+                runtime["classifier"](warmup_embedding)
 
     total_latencies: list[float] = []
     data_proc_latencies: list[float] = []
     inference_latencies: list[float] = []
+    records: list[dict[str, object]] = []
 
     resolved_xai_dir: Path | None = None
     if enable_xai and xai_output_dir is not None:
@@ -519,16 +644,38 @@ def load_and_simulate_transactions(
                 total_rows += 1
                 try:
                     row = _validate_row(raw_row, fieldnames)
-                    tx_json, d_lat, i_lat, t_lat, _ = process_transaction(
+                    tx_json, d_lat, i_lat, t_lat, inference = process_transaction(
                         row,
                         verbose=verbose,
-                        enable_xai=enable_xai,
+                        enable_xai=enable_xai or mode == "gemini-report",
                         xai_epochs=xai_epochs,
                         xai_num_hops=xai_num_hops,
                         xai_output_dir=resolved_xai_dir,
+                        mode=mode,
+                        reporter=reporter,
+                        report_dir=Path(report_dir) if report_dir else None,
+                        force_report=force_report,
                     )
-                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                except Exception as exc:
                     error_rows += 1
+                    records.append({
+                        "transaction_index": total_rows,
+                        "sender_account": raw_row.get("Sender_account") or "",
+                        "receiver_account": raw_row.get("Receiver_account") or "",
+                        "fraud_probability": "",
+                        "is_fraud": "",
+                        "data_processing_ms": "",
+                        "graphsage_inference_ms": "",
+                        "xai_subgraph_ms": "",
+                        "gnnexplainer_ms": "",
+                        "reason_code_ms": "",
+                        "total_ms": "",
+                        "explanation_generated": False,
+                        "status": "error",
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                        "is_cold_start": False,
+                    })
                     print(
                         f"Bỏ qua dòng {total_rows}: {exc}",
                         file=sys.stderr,
@@ -540,6 +687,21 @@ def load_and_simulate_transactions(
                 data_proc_latencies.append(d_lat)
                 inference_latencies.append(i_lat)
                 total_latencies.append(t_lat)
+                breakdown = inference.get("latency_breakdown", {})
+                records.append({
+                    "transaction_index": total_rows,
+                    "sender_account": inference.get("sender_account", ""),
+                    "receiver_account": inference.get("receiver_account", ""),
+                    "fraud_probability": inference.get("fraud_probability", ""),
+                    "is_fraud": inference.get("is_fraud", ""),
+                    **breakdown,
+                    "status": "success",
+                    "error_type": "",
+                    "error_message": inference.get("xai_error", ""),
+                    "report_status": inference.get("report_status", ""),
+                    "gemini_error": inference.get("gemini_error", ""),
+                    "is_cold_start": inference.get("is_cold_start", False),
+                })
 
                 if verbose and len(total_latencies) <= MAX_VERBOSE_ROWS:
                     print(
@@ -569,6 +731,23 @@ def load_and_simulate_transactions(
         )
 
     total_time = time.perf_counter() - start_time
+    _write_benchmark_outputs(
+        records,
+        total_rows=total_rows,
+        error_rows=error_rows,
+        total_time_ms=total_time * 1000.0,
+        metrics_output=metrics_output,
+        summary_output=summary_output,
+        enable_xai=enable_xai,
+        xai_epochs=xai_epochs,
+        xai_num_hops=xai_num_hops,
+        warmup_runs=warmup_runs,
+        include_cold_start=include_cold_start,
+        latency_plot_output=latency_plot_output,
+        mode=mode,
+    )
+    global _LAST_LATENCY_RECORDS
+    _LAST_LATENCY_RECORDS = records
     return (
         total_latencies,
         data_proc_latencies,
@@ -586,6 +765,7 @@ def print_summary(
     total_rows: int,
     error_rows: int,
     total_time: float,
+    fraud_transactions: int | None = None,
 ) -> None:
     """In thống kê phân rã độ trễ và đánh giá tiêu chuẩn SLA (< 100ms)."""
     successful_rows = len(total_latencies)
@@ -595,6 +775,21 @@ def print_summary(
     print(f"Tổng số dòng đã nạp     : {total_rows:,}")
     print(f"Số giao dịch thành công : {successful_rows:,}")
     print(f"Số dòng lỗi/bỏ qua      : {error_rows:,}")
+    if fraud_transactions is None:
+        fraud_transactions = sum(
+            record.get("is_fraud") is True
+            for record in _LAST_LATENCY_RECORDS
+            if record.get("status") == "success"
+        )
+    fraud_rate = (
+        fraud_transactions / successful_rows * 100.0
+        if successful_rows
+        else 0.0
+    )
+    print(
+        f"Số giao dịch nghi ngờ gian lận: {fraud_transactions:,} "
+        f"({fraud_rate:.2f}%)"
+    )
     print(f"Tổng thời gian mô phỏng : {total_time * 1000:.2f} ms")
 
     if not total_latencies:
@@ -653,6 +848,201 @@ def print_summary(
     print("-" * 65)
 
 
+def _latency_stats(
+    records: list[dict[str, object]],
+    field: str,
+    include_cold_start: bool = False,
+) -> dict[str, float]:
+    values = [
+        float(record[field])
+        for record in records
+        if record.get("status") == "success"
+        and record.get(field) not in ("", None)
+        and (include_cold_start or not record.get("is_cold_start", False))
+    ]
+    if not values:
+        return {key: 0.0 for key in ("mean", "p50", "p95", "p99", "min", "max")}
+    array = np.asarray(values, dtype=float)
+    return {
+        "mean": float(np.mean(array)),
+        "p50": float(np.percentile(array, 50)),
+        "p95": float(np.percentile(array, 95)),
+        "p99": float(np.percentile(array, 99)),
+        "min": float(np.min(array)),
+        "max": float(np.max(array)),
+    }
+
+
+def _write_benchmark_outputs(
+    records: list[dict[str, object]],
+    total_rows: int,
+    error_rows: int,
+    total_time_ms: float,
+    metrics_output: str | Path | None,
+    summary_output: str | Path | None,
+    enable_xai: bool,
+    xai_epochs: int,
+    xai_num_hops: int,
+    warmup_runs: int,
+    include_cold_start: bool,
+    latency_plot_output: str | Path | None = None,
+    mode: str = "latency",
+) -> None:
+    global _LAST_BENCHMARK_SUMMARY
+    successful = [r for r in records if r.get("status") == "success"]
+    fraud = [r for r in successful if r.get("is_fraud") is True]
+    explained = [r for r in successful if r.get("explanation_generated") is True]
+    report_success = [
+        r for r in fraud if r.get("report_status") == "success"
+    ]
+    report_failed = [
+        r for r in fraud if r.get("report_status") == "failed"
+    ]
+    fields = [
+        "transaction_index", "sender_account", "receiver_account",
+        "fraud_probability", "is_fraud", "data_processing_ms",
+        "graphsage_inference_ms", "xai_subgraph_ms", "gnnexplainer_ms",
+        "reason_code_ms", "total_ms", "total_model_xai_ms",
+        "gemini_called", "gemini_report_ms", "total_with_gemini_ms",
+        "explanation_generated", "report_generated", "report_status",
+        "status", "error_type", "error_message",
+    ]
+    if metrics_output is not None:
+        path = _resolve_file_path(metrics_output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows({key: row.get(key, "") for key in fields} for row in records)
+
+    summary = {
+        "total_rows_read": total_rows,
+        "successful_transactions": len(successful),
+        "error_transactions": error_rows,
+        "fraud_transactions": len(fraud),
+        "xai_transactions": len(explained),
+        "gemini_success_transactions": len(report_success),
+        "gemini_failed_transactions": len(report_failed),
+        "total_time_ms": total_time_ms,
+        "device": str(_INFERENCE_RUNTIME["node_embeddings"].device) if _INFERENCE_RUNTIME else "unknown",
+        "xai_enabled": enable_xai,
+        "mode": mode,
+        "xai_epochs": xai_epochs,
+        "xai_num_hops": xai_num_hops,
+        "warmup_runs": warmup_runs,
+        "warmup_excluded_from_statistics": True,
+        "cold_start_included": include_cold_start,
+        "statistics": {
+            "all": {field: _latency_stats(successful, field, include_cold_start) for field in (
+                "data_processing_ms", "graphsage_inference_ms", "xai_subgraph_ms",
+                "gnnexplainer_ms", "reason_code_ms", "total_ms",
+                "total_model_xai_ms", "gemini_report_ms", "total_with_gemini_ms")},
+            "fraud": {field: _latency_stats(fraud, field, include_cold_start) for field in (
+                "data_processing_ms", "graphsage_inference_ms", "xai_subgraph_ms",
+                "gnnexplainer_ms", "reason_code_ms", "total_ms",
+                "total_model_xai_ms", "gemini_report_ms", "total_with_gemini_ms")},
+            "xai": {field: _latency_stats(explained, field, include_cold_start) for field in (
+                "data_processing_ms", "graphsage_inference_ms", "xai_subgraph_ms",
+                "gnnexplainer_ms", "reason_code_ms", "total_ms",
+                "total_model_xai_ms", "gemini_report_ms", "total_with_gemini_ms")},
+            "gemini_success": {
+                field: _latency_stats(report_success, field, include_cold_start)
+                for field in ("total_ms", "total_model_xai_ms", "gemini_report_ms", "total_with_gemini_ms")
+            },
+            "gemini_failed": {
+                field: _latency_stats(report_failed, field, include_cold_start)
+                for field in ("total_ms", "total_model_xai_ms", "gemini_report_ms", "total_with_gemini_ms")
+            },
+        },
+    }
+    total_values = [
+        float(r["total_ms"])
+        for r in successful
+        if r.get("total_ms") not in ("", None)
+        and (include_cold_start or not r.get("is_cold_start", False))
+    ]
+    summary["total_under_100ms_ratio"] = (
+        sum(value < 100.0 for value in total_values) / len(total_values)
+        if total_values else 0.0
+    )
+    if latency_plot_output is not None:
+        plot_path = _write_latency_distribution_plot(
+            successful,
+            latency_plot_output,
+            include_cold_start=include_cold_start,
+        )
+        summary["latency_distribution_plot"] = str(plot_path)
+    for group in summary["statistics"].values():
+        if "total_ms" in group:
+            group["sla_p95_under_100ms"] = group["total_ms"]["p95"] < 100.0
+            group["sla_p99_under_100ms"] = group["total_ms"]["p99"] < 100.0
+    _LAST_BENCHMARK_SUMMARY = summary
+    if summary_output is not None:
+        path = _resolve_file_path(summary_output)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _write_latency_distribution_plot(
+    records: list[dict[str, object]],
+    output_path: str | Path,
+    include_cold_start: bool = False,
+) -> Path:
+    """Vẽ phân phối total latency và các mốc percentile/SLA."""
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise RuntimeError(
+            "Không thể tạo biểu đồ latency vì thiếu matplotlib. "
+            "Cài bằng: python -m pip install matplotlib"
+        ) from exc
+
+    values = [
+        float(record["total_ms"])
+        for record in records
+        if record.get("total_ms") not in ("", None)
+        and (include_cold_start or not record.get("is_cold_start", False))
+    ]
+    if not values:
+        raise ValueError("Không có latency thành công để tạo biểu đồ")
+
+    array = np.asarray(values, dtype=float)
+    percentiles = {
+        "P50": float(np.percentile(array, 50)),
+        "P95": float(np.percentile(array, 95)),
+        "P99": float(np.percentile(array, 99)),
+    }
+    path = _resolve_file_path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    figure, axis = plt.subplots(figsize=(10, 6))
+    bins = min(30, max(5, int(np.sqrt(len(array)))))
+    axis.hist(array, bins=bins, color="#457b9d", alpha=0.82, edgecolor="white")
+    for label, value, color in (
+        ("P50", percentiles["P50"], "#2a9d8f"),
+        ("P95", percentiles["P95"], "#f4a261"),
+        ("P99", percentiles["P99"], "#e63946"),
+    ):
+        axis.axvline(value, color=color, linestyle="--", linewidth=1.8,
+                     label=f"{label}: {value:.2f} ms")
+    axis.axvline(
+        100.0, color="#6a4c93", linestyle="-.", linewidth=1.8,
+        label="SLA: 100 ms",
+    )
+    axis.set_title("Latency Distribution")
+    axis.set_xlabel("End-to-end latency (ms)")
+    axis.set_ylabel("Number of transactions")
+    axis.grid(axis="y", alpha=0.25)
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+    return path
+
+
 def _positive_int(value: str) -> int:
     try:
         parsed_value = int(value)
@@ -684,6 +1074,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="in chi tiết tối đa 10 giao dịch đầu tiên",
     )
     parser.add_argument(
+        "--mode",
+        choices=("latency", "gemini-report"),
+        default="latency",
+        help="chế độ latency an toàn hoặc tạo report Gemini cho fraud",
+    )
+    parser.add_argument(
         "--enable-xai",
         action="store_true",
         help="bật GNNExplainer khi phát hiện giao dịch gian lận",
@@ -706,6 +1102,43 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         help="thư mục lưu explanation realtime; bỏ qua nếu không truyền",
     )
+    parser.add_argument(
+        "--metrics-output",
+        type=Path,
+        default=None,
+        help="đường dẫn CSV latency theo từng giao dịch",
+    )
+    parser.add_argument(
+        "--summary-output",
+        type=Path,
+        default=None,
+        help="đường dẫn JSON summary latency",
+    )
+    parser.add_argument("--gemini-model", default=None)
+    parser.add_argument("--gemini-timeout", type=float, default=30.0)
+    parser.add_argument("--gemini-retry-count", type=int, default=2)
+    parser.add_argument("--report-dir", type=Path, default=None)
+    parser.add_argument("--prompt-file", type=Path, default=None)
+    parser.add_argument("--top-k", type=_positive_int, default=5)
+    parser.add_argument("--max-prompt-chars", type=_positive_int, default=12000)
+    parser.add_argument("--force", action="store_true", help="tạo lại report đã cache")
+    parser.add_argument(
+        "--latency-plot-output",
+        type=Path,
+        default=None,
+        help="đường dẫn PNG biểu đồ phân phối total latency",
+    )
+    parser.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=0,
+        help="số lần warm-up được loại khỏi thống kê chính",
+    )
+    parser.add_argument(
+        "--include-cold-start",
+        action="store_true",
+        help="đưa giao dịch cold-start vào thống kê latency",
+    )
     return parser
 
 
@@ -720,6 +1153,20 @@ def main() -> None:
             xai_epochs=args.xai_epochs,
             xai_num_hops=args.xai_num_hops,
             xai_output_dir=args.xai_output_dir,
+            metrics_output=args.metrics_output,
+            summary_output=args.summary_output,
+            warmup_runs=args.warmup_runs,
+            include_cold_start=args.include_cold_start,
+            latency_plot_output=args.latency_plot_output,
+            mode=args.mode,
+            gemini_model=args.gemini_model,
+            gemini_timeout=args.gemini_timeout,
+            gemini_retry_count=args.gemini_retry_count,
+            report_dir=args.report_dir,
+            prompt_file=args.prompt_file,
+            top_k=args.top_k,
+            max_prompt_chars=args.max_prompt_chars,
+            force_report=args.force,
         )
     except (
         FileNotFoundError,
@@ -731,7 +1178,10 @@ def main() -> None:
         print(f"Lỗi: {exc}", file=sys.stderr)
         return
 
-    print_summary(*metrics)
+    print_summary(*metrics, fraud_transactions=len([
+        record for record in _LAST_LATENCY_RECORDS
+        if record.get("status") == "success" and record.get("is_fraud") is True
+    ]))
 
 
 if __name__ == "__main__":

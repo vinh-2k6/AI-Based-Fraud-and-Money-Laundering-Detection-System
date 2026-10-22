@@ -245,4 +245,6 @@ data/processed/reason_codes/
 data/processed/transaction_reports/
 data/processed/subgraphs/
 data/processed/xai_explanations/
+data/processed/benchmarks/
+data/processed/xai_realtime/
 docs/api_key.md

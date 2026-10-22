@@ -497,6 +497,64 @@ Realtime pipeline dùng:
 Giao dịch cold-start có thể được dự đoán nhưng có thể không tạo được subgraph
 XAI nếu account chưa tồn tại trong graph nền.
 
+Đo baseline latency theo từng giao dịch và xuất CSV/JSON:
+
+```powershell
+python scripts\simulate_realtime.py `
+  --file_path data\processed\test_cleaned.csv `
+  --limit 100 `
+  --enable-xai `
+  --xai-epochs 200 `
+  --xai-num-hops 2 `
+  --xai-output-dir data\processed\xai_realtime `
+  --metrics-output data\processed\benchmarks\realtime_latency.csv `
+  --summary-output data\processed\benchmarks\realtime_latency_summary.json `
+  --latency-plot-output data\processed\benchmarks\latency_distribution.png `
+  --warmup-runs 1 `
+  --verbose
+```
+
+Metrics tách riêng `data_processing_ms`, `graphsage_inference_ms`,
+`xai_subgraph_ms`, `gnnexplainer_ms`, `reason_code_ms` và `total_ms`.
+Summary JSON chứa mean, P50, P95, P99, min, max cho toàn bộ giao dịch,
+giao dịch fraud và giao dịch đã chạy XAI. Warm-up không được đưa vào các
+thống kê chính; dùng `--include-cold-start` nếu muốn đưa các giao dịch
+cold-start vào thống kê. Đây là phép đo baseline tuần tự, không tối ưu tài
+nguyên và không gọi Gemini. Tùy chọn `--latency-plot-output` tạo biểu đồ
+`Latency Distribution` dạng PNG từ `total_ms`, có các đường P50, P95, P99
+và ngưỡng SLA 100 ms. Cần cài `matplotlib` nếu môi trường chưa có thư viện
+này.
+
+`simulate_realtime.py` có hai chế độ chạy:
+
+- `--mode latency` (mặc định): chạy prediction và XAI tùy chọn, tuyệt đối
+  không khởi tạo hoặc gọi Gemini.
+- `--mode gemini-report`: tự bật XAI cho giao dịch bị đánh dấu fraud, sau đó
+  dùng `TransactionReporter` để tạo report. Giao dịch non-fraud không gọi
+  Gemini và không tạo report.
+
+Ví dụ tạo report:
+
+```powershell
+python scripts\simulate_realtime.py `
+  --file_path data\processed\test_cleaned.csv `
+  --limit 100 `
+  --mode gemini-report `
+  --gemini-model gemini-3.6-flash `
+  --report-dir data\processed\transaction_reports `
+  --metrics-output data\processed\benchmarks\gemini_metrics.csv `
+  --summary-output data\processed\benchmarks\gemini_summary.json
+```
+
+Chế độ này đọc `GEMINI_API_KEY` từ biến môi trường. `--force` tạo lại report
+đã cache; `--top-k` và `--max-prompt-chars` giới hạn payload. Metrics tách
+`total_model_xai_ms`, `gemini_report_ms` và `total_with_gemini_ms`, do đó
+latency mạng Gemini không bị trộn vào latency model/XAI. Lỗi Gemini chỉ được
+ghi theo transaction và không làm dừng batch. Payload được xử lý bởi
+`TransactionReporter` với allowlist/bounded fields và account masking.
+Summary JSON tách các nhóm `all`, `fraud`, `xai`, `gemini_success` và
+`gemini_failed`.
+
 ## 14. Kiểm thử
 
 Chạy test toàn bộ:
@@ -561,6 +619,3 @@ data/
 - Theo dõi chi phí bằng `--limit`, `--top-k`, `--max-prompt-chars` và cache.
 - Giữ lại checkpoint, manifest, prompt version và cấu hình threshold để tái
   lập kết quả.
-
-
-
