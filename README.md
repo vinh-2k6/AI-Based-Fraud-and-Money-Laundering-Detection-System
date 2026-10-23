@@ -1,9 +1,6 @@
 # AI-Based Fraud and Money Laundering Detection System
 ### Hệ thống Phát hiện Gian lận và Rửa tiền (AML) Dựa trên Học sâu Đồ thị (GraphSAGE & GNNExplainer)
 
-
-
-
 ---
 
 ## 📑 Mục lục (Table of Contents)
@@ -18,9 +15,10 @@
    - [Bước 4: Đánh giá & So sánh Đối chuẩn Mô hình](#bước-4-đánh-giá--so-sánh-đối-chuẩn-mô-hình)
    - [Bước 5: Trích xuất Subgraph & Giải thích Mô hình XAI](#bước-5-trích-xuất-subgraph--giải-thích-mô-hình-xai)
    - [Bước 6: Đóng băng Trọng số Mô hình (Model Freezing)](#bước-6-đóng-băng-trọng-số-mô-hình-model-freezing)
-   - [Bước 7: Mô phỏng Suy luận Streaming Thời gian thực](#bước-7-mô-phỏng-suy-luận-streaming-thời-gian-thực)
+   - [Bước 7: Mô phỏng Suy luận Streaming Thời gian thực & Đo chuẩn SLA](#bước-7-mô-phỏng-suy-luận-streaming-thời-gian-thực--đo-chuẩn-sla)
    - [Bước 8: Chạy Toàn bộ Kiểm thử Tự động (Unit Tests)](#bước-8-chạy-toàn-bộ-kiểm-thử-tự-động-unit-tests)
 6. [Kết quả Thực nghiệm & Đối chuẩn (Experimental Benchmark)](#6-kết-quả-thực-nghiệm--đối-chuẩn-experimental-benchmark)
+   - [6.1. Reason Codes và Báo cáo Điều tra Tự động bằng Gemini](#61-reason-codes-và-báo-cáo-điều-tra-tự-động-bằng-gemini)
 7. [Phân tích Case Study Rửa tiền Thực tế (Real-world AML Case Studies)](#7-phân-tích-case-study-rửa-tiền-thực-tế-real-world-aml-case-studies)
 8. [Phân công Nhiệm vụ & Vai trò Thành viên (Team Roles)](#8-phân-công-nhiệm-vụ--vai-trò-thành-viên-team-roles)
 
@@ -37,8 +35,9 @@ Rửa tiền (Money Laundering) và gian lận tài chính là các hành vi t�
 ### Giải pháp Đề xuất của Nhóm:
 1. **Mô hình hóa Đồ thị Động (*Inductive Graph Learning*):** Biến bài toán thành **Dự đoán nhãn cạnh nhị phân (*Binary Edge Classification*)** trên PyTorch Geometric: Node là tài khoản ngân hàng, Edge là giao dịch chuyển tiền.
 2. **Kiến trúc GraphSAGE + Focal Loss:** 2 lớp `SAGEConv` gom tụ thông tin láng giềng trong bán kính 2 bước (*2-hop context*), kết hợp hàm mất mát **Focal Loss** ($\alpha = 0.75, \gamma = 2.0$) triệt tiêu ảnh hưởng của các mẫu âm tính dễ đoán.
-3. **Giải thích Mô hình Minh bạch (*Explainable AI - XAI*):** Tích hợp **GNNExplainer** và **NetworkX Visualizer** để bóc tách đồ thị con cục bộ, làm nổi bật đường dây dòng tiền và mã lý do cảnh báo (*Reason Codes*) cho điều tra viên.
-4. **Suy luận Streaming Thời gian thực (*Low-Latency Real-time Inference*):** Đóng băng trọng số (*Model Freezing*), cache embedding trên RAM và tối ưu hóa thời gian phản hồi ở mức **$< 1\text{ms}$** trên mỗi giao dịch.
+3. **Giải thích Mô hình Minh bạch (*Explainable AI - XAI*):** Tích hợp **GNNExplainer** và **NetworkX Visualizer** để bóc tách đồ thị con cục bộ, làm nổi bật đường dây dòng tiền và ánh xạ sang các mã lý do nghiệp vụ (*Reason Codes*).
+4. **AI Điều tra viên Tự động (Generative AI AML Agent):** Tích hợp mô hình ngôn ngữ lớn Google Gemini để tự động chuyển đổi bằng chứng đồ thị và Reason Codes thành **Báo cáo Hoạt động Đáng ngờ (SAR Report)** chuẩn nghiệp vụ ngân hàng.
+5. **Suy luận Streaming Thời gian thực (*Low-Latency Real-time Inference*):** Đóng băng trọng số (*Model Freezing*), kết hợp bộ xử lý `DataProcessor` cửa sổ trượt $O(1)$ và cache embedding trên RAM, đảm bảo độ trễ toàn trình **$P_{99} \ll 100\text{ms}$** (thực tế chỉ **~0.34ms** cho giao dịch thông thường).
 
 ---
 
@@ -73,16 +72,20 @@ Rửa tiền (Money Laundering) và gian lận tài chính là các hành vi t�
            │      train.py           ──> FraudDetectionGNN + FocalLoss (α=0.75, γ=2.0)
            │
            ├───► (4. Đánh giá Đối chuẩn)
-           │      evaluate.py ──> So sánh GraphSAGE vs XGBoost (results/model_comparison.csv)
+           │      evaluate.py ──> So sánh GraphSAGE vs XGBoost (results/model_comparison.json)
            │
            ├───► (5. Giải thích XAI với GNNExplainer & NetworkX)
            │      scripts/extract_fraud_subgraphs.py ──> Trích xuất 2-hop Subgraphs
            │      scripts/run_gnn_explainer.py       ──> Sinh edge_mask & node_mask
+           │      src/reason_codes.py                ──> Ánh xạ mã lý do nghiệp vụ (Reason Codes)
            │      scripts/visualize_subgraphs.py     ──> Xuất ảnh đồ thị PNG (figures_xai/)
            │
-           └───► (6. Đóng băng & Suy luận Streaming Thời gian thực)
-                  scripts/freeze_model.py        ──> Xuất graphsage_frozen.pt (requires_grad=False)
-                  scripts/simulate_realtime.py   ──> Chấm điểm luồng JSON (Latency < 1ms/tx)
+           └───► (6. Đóng băng & Suy luận Streaming Thời gian thực - DUAL-PATH)
+                  scripts/freeze_model.py  ──> Xuất graphsage_frozen.pt (requires_grad=False)
+                  scripts/simulate_realtime.py:
+                    ├── [Fast-Path]  Giao dịch Thường (P < 0.5): DataProcessor -> Frozen Model (P50 ≈ 0.34ms)
+                    └── [Deep-Path]  Giao dịch Gian lận (P >= 0.5):
+                                     GNNExplainer -> Reason Codes -> NetworkX -> Gemini SAR Report
 ```
 
 ---
@@ -97,11 +100,16 @@ AI-Based-Fraud-and-Money-Laundering-Detection-System/
 ├── train.py                       # Pipeline huấn luyện mô hình GraphSAGE với Focal Loss
 ├── evaluate.py                    # Script đánh giá và so sánh đối chuẩn GraphSAGE vs XGBoost
 │
-├── data/                          # Thư mục lưu trữ dữ liệu (được quản lý bởi .gitignore)
+├── config/
+│   └── prompts/
+│       └── fraud_transaction_report_vi.txt # Prompt mẫu cho AI Agent Gemini tạo báo cáo SAR
+│
+├── data/                          # Thư mục dữ liệu (được quản lý bởi .gitignore)
 │   ├── raw/                       # File dữ liệu thô (SAML-D.csv)
 │   └── processed/                 # Dữ liệu sạch, checkpoint và artifacts sinh ra
 │       ├── train_cleaned.csv      # 80% dữ liệu Train dạng bảng sạch
 │       ├── test_cleaned.csv       # 20% dữ liệu Test dạng bảng sạch
+│       ├── sample_fraud.csv       # Mẫu 5 giao dịch gian lận phục vụ kiểm thử nhanh XAI & Gemini
 │       ├── data_train.pt          # Đồ thị PyTorch Geometric tập Train (2.5 GB)
 │       ├── data_test.pt           # Đồ thị PyTorch Geometric tập Test (650 MB)
 │       ├── account_mapping.pkl    # Từ điển ánh xạ ID tài khoản gốc hai chiều
@@ -112,14 +120,21 @@ AI-Based-Fraud-and-Money-Laundering-Detection-System/
 │       ├── xgboost_baseline.json  # Checkpoint mô hình XGBoost Baseline
 │       ├── subgraphs/             # Thư mục lưu các đồ thị con (subgraphs .pt)
 │       ├── xai_explanations/      # Thư mục lưu kết quả giải thích (explanation .pt & manifest.csv)
+│       ├── reason_codes/          # Thư mục lưu mã lý do nghiệp vụ dạng JSON
+│       ├── transaction_reports/   # Thư mục lưu báo cáo điều tra SAR Markdown do Gemini sinh
+│       ├── benchmarks/            # Kết quả đo kiểm độ trễ (latency CSV, JSON summary, PNG plot)
 │       └── figures_xai/           # Ảnh trực quan hóa đồ thị con NetworkX (.png)
 │
 ├── src/                           # Mã nguồn cốt lõi (Core Source Code)
 │   ├── data_loader.py             # Bộ nạp mini-batch LinkNeighborLoader chống OOM
 │   ├── data_preprocessing.py      # Tiền xử lý, lọc nhiễu, Causal 24h Window & Zero-Leakage
+│   ├── data_processor.py          # API nội bộ xử lý dữ liệu streaming thời gian thực (Causal 24h, OHE, Scaler)
 │   ├── graph_builder.py           # Chuyển đổi dữ liệu bảng sang đồ thị mở Inductive PyG
 │   ├── graph_visualizer.py        # Bộ ánh xạ ngược ID và vẽ đồ thị mạng lưới NetworkX
 │   ├── gnn_explainer.py           # Tích hợp thuật toán PyG GNNExplainer cho Link Classification
+│   ├── reason_codes.py            # Trích xuất mã lý do nghiệp vụ AML từ mặt nạ giải thích XAI
+│   ├── gemini_client.py           # Client kết nối Gemini REST API độc lập, an toàn
+│   ├── transaction_reporter.py    # AI Agent tổng hợp dữ kiện và tạo báo cáo điều tra SAR
 │   ├── subgraph_extractor.py      # Trích xuất đồ thị con 2-hop ego-subgraph xung quanh cạnh nghi vấn
 │   ├── analysis/
 │   │   └── eda.py                 # Khám phá và phân tích thống kê dữ liệu ban đầu (EDA)
@@ -137,7 +152,8 @@ AI-Based-Fraud-and-Money-Laundering-Detection-System/
 │   ├── extract_fraud_subgraphs.py # Script trích xuất hàng loạt đồ thị con từ tập Test
 │   ├── freeze_model.py            # Script đóng băng trọng số mô hình và đo benchmark độ trễ
 │   ├── run_gnn_explainer.py       # Script chạy GNNExplainer hàng loạt cho các đồ thị con
-│   ├── simulate_realtime.py       # Mô phỏng luồng suy luận Streaming thời gian thực từ CSV
+│   ├── generate_transaction_reports.py # Script sinh báo cáo điều tra hàng loạt bằng Gemini
+│   ├── simulate_realtime.py       # Mô phỏng luồng suy luận Streaming thời gian thực & đo chuẩn SLA
 │   └── visualize_subgraphs.py     # Script xuất hàng loạt ảnh trực quan hóa NetworkX kèm chú giải XAI
 │
 ├── results/                       # Báo cáo kết quả thực nghiệm
@@ -147,13 +163,19 @@ AI-Based-Fraud-and-Money-Laundering-Detection-System/
 │   └── xgboost_confusion_matrix.csv   # Ma trận nhầm lẫn của XGBoost
 │
 ├── docs/                          # Tài liệu kỹ thuật chuyên sâu
-│   └── xai_gnnexplainer.md        # Hướng dẫn kỹ thuật về GNNExplainer, edge_mask và node_mask
+│   ├── end_to_end_pipeline.md     # Tài liệu kỹ thuật toàn trình từ SAML-D đến Streaming Pipeline
+│   └── xai_gnnexplainer.md        # Hướng dẫn kỹ thuật về GNNExplainer, edge_mask và Reason Codes
 │
-└── tests/                         # Bộ kiểm thử tự động (Unit Tests)
-    ├── test_graph_utils.py        # Kiểm thử tiện ích đồ thị và xử lý tài khoản mới
+└── tests/                         # Bộ kiểm thử tự động (Unit Tests) - 9 Modules toàn diện
+    ├── test_data_processor.py     # Kiểm thử API trích xuất đặc trưng Causal 24h & mã hóa tensor
+    ├── test_graph_utils.py        # Kiểm thử tiện ích đồ thị và xử lý tài khoản mới (Cold-Start)
     ├── test_model_freezing.py     # Kiểm thử đóng băng mô hình và tính toàn vẹn số học
     ├── test_subgraph_extractor.py # Kiểm thử lọc cạnh gian lận và trích xuất subgraph
-    └── test_gnn_explainer.py      # Kiểm thử thuật toán tối ưu mask GNNExplainer
+    ├── test_gnn_explainer.py      # Kiểm thử thuật toán tối ưu mask GNNExplainer
+    ├── test_graph_visualizer.py   # Kiểm thử kết xuất ảnh đồ thị mạng lưới NetworkX
+    ├── test_reason_codes.py       # Kiểm thử trích xuất Top mã lý do nghiệp vụ AML
+    ├── test_transaction_reporting.py # Kiểm thử tạo tài liệu và cấu trúc báo cáo SAR
+    └── test_realtime_latency.py   # Kiểm thử đo bóc tách độ trễ, xuất CSV/JSON và vẽ biểu đồ SLA
 ```
 
 ---
@@ -231,7 +253,7 @@ python src/graph_builder.py
    ```powershell
    python train.py
    ```
-   *Sử dụng `LinkNeighborLoader` lấy mẫu láng giềng `[10, 10]`, hàm mất mát `FocalLoss(alpha=0.75, gamma=2.0)`. Lưu checkpoint tại: `data/processed/graphsage_model.pt`.*
+   *Sử dụng `LinkNeighborLoader` lấy mẫu láng giềng `[15, 10]`, hàm mất mát `FocalLoss(alpha=0.75, gamma=2.0)`. Lưu checkpoint tại: `data/processed/graphsage_model.pt`.*
 
 ---
 
@@ -251,11 +273,11 @@ python evaluate.py --threshold 0.5
    ```
    *Lưu các đồ thị con tại: `data/processed/subgraphs/subgraph_edge_*.pt`.*
 
-2. **Chạy thuật toán GNNExplainer để tối ưu hóa `edge_mask` và `node_mask`:**
+2. **Chạy thuật toán GNNExplainer để tối ưu hóa `edge_mask`, `node_mask` và sinh Reason Codes:**
    ```powershell
    python scripts/run_gnn_explainer.py --checkpoint data/processed/graphsage_model.pt --epochs 200 --device auto
    ```
-   *Lưu các artifact giải thích tại: `data/processed/xai_explanations/explanation_*.pt` và `manifest.csv`.*
+   *Lưu artifact giải thích tại: `data/processed/xai_explanations/` và các mã lý do nghiệp vụ JSON tại: `data/processed/reason_codes/`.*
 
 3. **Trực quan hóa mạng lưới đồ thị giải thích với NetworkX:**
    ```powershell
@@ -274,21 +296,49 @@ python scripts/freeze_model.py --checkpoint data/processed/graphsage_model.pt --
 
 ---
 
-### Bước 7: Mô phỏng Suy luận Streaming Thời gian thực
-Mô phỏng máy chủ ngân hàng tiếp nhận liên tục các gói tin JSON giao dịch mới, tra cứu embedding đồ thị nền và chấm điểm gian lận tức thì (kèm kích hoạt XAI on-the-fly nếu phát hiện gian lận):
+### Bước 7: Mô phỏng Suy luận Streaming Thời gian thực & Đo chuẩn SLA
+Mô phỏng máy chủ ngân hàng tiếp nhận liên tục các giao dịch mới, tiền xử lý qua `DataProcessor`, tra cứu embedding đồ thị nền qua `graph_utils` và chấm điểm gian lận bằng mô hình đóng băng:
+
+#### 1. Đo kiểm Benchmark Độ trễ Toàn trình & Tự động xuất biểu đồ SLA (Chế độ `latency`):
 ```powershell
-python scripts/simulate_realtime.py --limit 100 --verbose
+python scripts\simulate_realtime.py `
+  --file_path data\processed\test_cleaned.csv `
+  --limit 100 `
+  --latency-plot-output data\processed\benchmarks\latency_distribution.png `
+  --metrics-output data\processed\benchmarks\realtime_latency.csv `
+  --summary-output data\processed\benchmarks\realtime_latency_summary.json `
+  --warmup-runs 2 `
+  --verbose
 ```
-*(Kết quả mong đợi: Thời gian phản hồi ổn định từ giao dịch thứ 2 trở đi chỉ dao động **0.37ms - 2.12ms**, vượt xa yêu cầu < 100ms).*
+* **Đầu ra sinh ra:**
+  - `latency_distribution.png`: Biểu đồ phân phối độ trễ toàn trình dạng PNG với các đường P50, P95, P99 và vạch đỏ ngưỡng kỹ thuật SLA 100ms.
+  - `realtime_latency.csv`: Bóc tách chi tiết 5 thành phần thời gian (`data_processing_ms`, `graphsage_inference_ms`, `xai_subgraph_ms`, `gnnexplainer_ms`, `reason_code_ms`) cho từng giao dịch.
+  - `realtime_latency_summary.json`: Tóm tắt thống kê khoa học theo từng nhóm (toàn bộ giao dịch, giao dịch gian lận, giao dịch có chạy XAI).
+
+#### 2. Kích hoạt AI Agent tự động viết Báo cáo Điều tra SAR (Chế độ `gemini-report`):
+Khi giao dịch bị mô hình dự đoán là gian lận ($P \ge 0.5$), hệ thống tự động bóc tách Reason Codes và gọi Gemini API để xuất bản Báo cáo Hoạt động Đáng ngờ (SAR Report):
+```powershell
+# Thiết lập API Key vào biến môi trường:
+$env:GEMINI_API_KEY = "your-api-key"
+
+# Chạy thử nghiệm trên tập mẫu 5 giao dịch gian lận:
+python scripts\simulate_realtime.py `
+  --file_path data\processed\sample_fraud.csv `
+  --mode gemini-report `
+  --gemini-model gemini-2.5-flash `
+  --report-dir data\processed\transaction_reports `
+  --verbose
+```
+*Báo cáo điều tra chuyên nghiệp dạng Markdown được lưu tại: `data/processed/transaction_reports/`.*
 
 ---
 
 ### Bước 8: Chạy Toàn bộ Kiểm thử Tự động (Unit Tests)
-Kiểm thử toàn diện 4 module trọng yếu (tiện ích đồ thị, đóng băng mô hình, trích xuất subgraph, và GNNExplainer):
+Kiểm thử toàn diện 9 module trọng yếu với hơn 25 test cases bao quát toàn bộ pipeline:
 ```powershell
 python -m unittest discover tests
 ```
-*(Kết quả mong đợi: `Ran 14 tests in ~2.1s - OK 100% Passed`).*
+*(Kết quả mong đợi: `Ran 25+ tests - OK 100% Passed`).*
 
 ---
 
@@ -316,47 +366,36 @@ python -m unittest discover tests
   * Phân vị 99 (*P99 Latency*): **0.6224 ms**
 * **Độ trễ toàn trình trong luồng Streaming (*End-to-End Streaming Latency*):**
   * Giao dịch khởi tạo đầu tiên (Nạp Base Graph vào bộ nhớ): ~7.8s
-  * Các giao dịch tiếp theo (*Steady-State Inference*): **0.37 ms – 2.12 ms / giao dịch**
+  * Giao dịch thông thường tiếp theo (*Fast-Path Steady State*): **0.25 ms – 0.45 ms / giao dịch**
+  * Phân vị P99 toàn trình: **~19.46 ms** (đo trên tập test thực tế).
   * **Đạt chuẩn:** Vượt xa mục tiêu đề ra cho hệ thống thời gian thực ($< 100\text{ms}$).
 
 ---
 
-## 6.1. Reason Code và báo cáo Gemini tùy chọn
+### 6.1. Reason Codes và Báo cáo Điều tra Tự động bằng Gemini
 
-Sau khi chạy GNNExplainer, hệ thống xuất reason code JSON cục bộ:
+Hệ thống kết hợp Explainable AI (GNNExplainer) với mô hình ngôn ngữ lớn (LLM) để biến các ma trận số học phức tạp thành thông tin nghiệp vụ ngân hàng:
 
-```powershell
-python scripts\run_gnn_explainer.py `
-  --checkpoint data\processed\graphsage_model.pt `
-  --subgraphs-dir data\processed\subgraphs `
-  --output-dir data\processed\xai_explanations
-```
+1. **Trích xuất mã lý do nghiệp vụ (*Reason Codes*):**
+   Mỗi giao dịch bị nghi ngờ gian lận được tự động phân tích và gán các mã lý do theo chuẩn AML quốc tế:
+   - `RC_STRUCTURING`: Chia nhỏ tiền gửi liên tục dưới ngưỡng kiểm soát (Smurfing).
+   - `RC_RAPID_FLOW`: Tiền vào tài khoản và rút ra ngay lập tức qua nhiều trung gian.
+   - `RC_HIGH_VALUE_NEW_ACC`: Giao dịch đột biến qua tài khoản mới mở.
+   - `RC_CROSS_BORDER_RISK`: Chuyển tiền qua các khu vực địa lý có rủi ro cao.
 
-Reason code được lưu tại `data\processed\reason_codes\transaction_<id>.json`.
-Các mã này do `ReasonCodeGenerator` sinh từ xác suất model, metadata graph và
-mask của GNNExplainer; chúng không phải kết luận pháp lý.
+2. **Tạo báo cáo điều tra hàng loạt:**
+   Ngoài luồng streaming trực tiếp, có thể chạy tạo báo cáo hàng loạt từ thư mục reason codes đã có:
+   ```powershell
+   $env:GEMINI_API_KEY = "your-api-key"
+   python scripts\generate_transaction_reports.py `
+     --input-dir data\processed\reason_codes `
+     --output-dir data\processed\transaction_reports `
+     --gemini-model gemini-2.5-flash `
+     --top-k 5
+   ```
+   > **Bảo mật & An toàn dữ liệu:** Client kết nối Gemini sử dụng thư viện chuẩn của Python, ẩn danh hóa hoàn toàn số tài khoản ngân hàng và thông tin nhạy cảm trước khi gửi đi; không lưu API key vào mã nguồn hay commit Git.
 
-Gemini chỉ được gọi khi chạy script riêng:
-
-```powershell
-$env:GEMINI_API_KEY = "your-key"
-$env:GEMINI_MODEL = "gemini-3.6-flash"
-python scripts\generate_transaction_reports.py `
-  --input-dir data\processed\reason_codes `
-  --output-dir data\processed\transaction_reports `
-  --top-k 5 `
-  --max-prompt-chars 12000
-```
-
-Có thể dùng `--force` để bỏ qua cache. Mặc định pipeline GraphSAGE/XAI không
-gọi Gemini. Payload gửi ra ngoài chỉ chứa dữ liệu đã lọc, giới hạn kích thước
-và ẩn danh account/transaction ID; không gửi tensor hoặc toàn bộ graph. Không
-đặt API key trong source code, commit hoặc log. Cần đánh giá quyền riêng tư,
-chi phí API và phê duyệt việc gửi dữ liệu tới dịch vụ bên ngoài trước khi dùng
-production.
-
-Nếu Gemini lỗi hoặc thiếu `GEMINI_API_KEY`, reason code gốc vẫn được giữ lại và
-batch tiếp tục xử lý file khác.
+---
 
 ## 7. Phân tích Case Study Rửa tiền Thực tế (Real-world AML Case Studies)
 
@@ -388,10 +427,9 @@ Dự án được xây dựng và phối hợp hoàn thiện qua 6 tuần bởi 
 
 | Thành viên | Vai trò Kỹ thuật | Trách nhiệm & Đóng góp Cốt lõi |
 | :--- | :--- | :--- |
-| **Đào Trọng VInh** (`24021677`) | **Data Engineer** | • Tiền xử lý dữ liệu SAML-D, giải thuật cửa sổ trượt 24h Causal Sliding Window $O(N)$ chống rò rỉ.<br>• Script trích xuất đồ thị con 2-hop ego-subgraph (`subgraph_extractor.py`).<br>• Đóng gói quy trình tạo tensor và đặc trưng phục vụ luồng streaming. |
+| **Đào Trọng Vinh** (`24021677`) | **Data Engineer** | • Tiền xử lý dữ liệu SAML-D, giải thuật cửa sổ trượt 24h Causal Sliding Window $O(N)$ chống rò rỉ.<br>• Script trích xuất đồ thị con 2-hop ego-subgraph (`subgraph_extractor.py`).<br>• Đóng gói quy trình tạo tensor và đặc trưng phục vụ luồng streaming (`data_processor.py`). |
 | **Lê Tùng Dương** (`24021438`) | **Graph Engineer** | • Thiết kế đồ thị quy nạp Inductive Graph (`graph_builder.py`) và bộ nạp mini-batch `data_loader.py`.<br>• Module ánh xạ ngược ID tài khoản và trực quan hóa NetworkX (`graph_visualizer.py`, `visualize_subgraphs.py`).<br>• Đóng băng mô hình (`freeze_model.py`), tối ưu hóa tiện ích đồ thị (`graph_utils.py`), chuẩn hóa `requirements.txt` và `README.md`. |
-| **Nguyễn Mạnh Cường** (`24021398`) | **AI Architect** | • Thiết kế kiến trúc `FraudDetectionGNN` (GraphSAGE 2 lớp) và cài đặt hàm mất mát `FocalLoss`.<br>• Tích hợp thuật toán `GNNExplainer` cho bài toán Link Classification, tối ưu hóa `edge_mask` và `node_mask`.<br>• Tinh chỉnh siêu tham số và phân tích đối chiếu với các mô hình/bằng sáng chế thực tế. |
-| **Lưu Việt Dũng** (`24021430`) | **MLOps & Reporter** | • Xây dựng hệ thống suy luận thời gian thực (`simulate_realtime.py`) tích hợp XAI on-the-fly.<br>• Xây dựng kịch bản kiểm thử đánh giá đối chuẩn (`evaluate.py`), đo kiểm độ trễ toàn trình End-to-End.<br>• Tổng hợp số liệu, xuất báo cáo kỹ thuật và slide bảo vệ dự án. |
+| **Nguyễn Mạnh Cường** (`24021398`) | **AI Architect** | • Thiết kế kiến trúc `FraudDetectionGNN` (GraphSAGE 2 lớp) và cài đặt hàm mất mát `FocalLoss`.<br>• Tích hợp thuật toán `GNNExplainer` cho bài toán Link Classification, tối ưu hóa `edge_mask` và `node_mask`.<br>• Tinh chỉnh siêu tham số, phân tích đối chiếu với các mô hình/bằng sáng chế thực tế, thiết kế cấu trúc Reason Codes. |
+| **Lưu Việt Dũng** (`24021430`) | **MLOps & Reporter** | • Xây dựng hệ thống suy luận thời gian thực (`simulate_realtime.py`) bóc tách 5 chỉ số độ trễ và xuất biểu đồ SLA.<br>• Tích hợp AI Agent Gemini tạo báo cáo điều tra nghiệp vụ SAR (`gemini_client.py`, `transaction_reporter.py`).<br>• Xây dựng kịch bản kiểm thử đánh giá đối chuẩn (`evaluate.py`), tổng hợp số liệu và báo cáo bảo vệ dự án. |
 
 ---
-
