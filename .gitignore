@@ -227,3 +227,24 @@ venv/
 *.pt
 __pycache__/
 .vscode/
+
+# Project datasets & large artifacts
+data/raw/
+data/processed/*.csv
+data/processed/*.pt
+*.pth
+*.pt
+venv/
+*.pt
+__pycache__/
+.vscode/
+data/processed/subgraphs_manifest.csv
+
+# Generated transaction explanations and reports
+data/processed/reason_codes/
+data/processed/transaction_reports/
+data/processed/subgraphs/
+data/processed/xai_explanations/
+data/processed/benchmarks/
+data/processed/xai_realtime/
+docs/api_key.md

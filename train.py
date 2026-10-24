@@ -170,8 +170,13 @@ def train():
             total_loss += loss.item() * batch_size_current
             total_samples += batch_size_current
             
+<<<<<<< HEAD
             # if i >= max_batches_per_epoch:
             #     break
+=======
+            # if i + 1 >= max_batches_per_epoch:
+            #     break
+>>>>>>> bbce8d1a16d70152b3cf454520101af33ae61b52
                 
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         print(f"Epoch {epoch}/{epochs} - Loss: {avg_loss:.4f}")

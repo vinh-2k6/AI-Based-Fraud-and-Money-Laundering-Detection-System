@@ -1,15 +1,15 @@
 """
 graph_builder.py
 ================
-Chuyen doi du lieu giao dich sang dinh dang do thi PyTorch Geometric (Production-Ready).
+Chuyen doi du lieu giao dich sang dinh dang do thi PyTorch Geometric (Production-Ready)
 
 Kien truc:
-  1. [Inductive Graph]    : Mapping ID dong ho tro cac nut moi chua tung xuat hien.
-  2. [Cyclical Encoding]  : Ma hoa chu ky luong giac (Sine/Cosine) cho thoi gian.
-  3. [One-Hot Encoding]   : OHE cho bien phan loai tren canh, xu ly theo chunk de tranh OOM.
-  4. [Cold-start Handling]: Them mask `is_new_node` chong nhieu ty le gian lan mac dinh.
-  5. [No Data Leakage]    : Node structural stats & fraud history deu chi tinh tu train_df.
-  6. [NaN-safe Indexing]  : Kiem tra notna() truoc moi phep gan index de chong crash.
+  1. [Inductive Graph]    : Mapping ID dong ho tro cac nut moi chua tung xuat hien
+  2. [Cyclical Encoding]  : Ma hoa chu ky luong giac (Sine/Cosine) cho thoi gian
+  3. [One-Hot Encoding]   : OHE cho bien phan loai tren canh, xu ly theo chunk de tranh OOM
+  4. [Cold-start Handling]: Them mask `is_new_node` chong nhieu ty le gian lan mac dinh
+  5. [No Data Leakage]    : Node structural stats & fraud history deu chi tinh tu train_df
+  6. [NaN-safe Indexing]  : Kiem tra notna() truoc moi phep gan index de chong crash
 """
 
 import pandas as pd
@@ -61,15 +61,27 @@ CATEGORICAL_COLS = [
 # 1. LOAD DATA
 # ============================================================
 
-print("=" * 60)
-print("Loading data...")
-print("=" * 60)
+def load_datasets(
+    train_csv: Path | str = TRAIN_CSV,
+    test_csv: Path | str = TEST_CSV,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Tải tập dữ liệu Train và Test sạch từ đĩa."""
+    print("=" * 60)
+    print("Loading data...")
+    print("=" * 60)
+    train_path = Path(train_csv)
+    test_path = Path(test_csv)
+    if not train_path.exists() or not test_path.exists():
+        raise FileNotFoundError(
+            f"Không tìm thấy file CSV tại {train_path} hoặc {test_path}. "
+            "Hãy chạy data_preprocessing.py trước!"
+        )
+    train_df = pd.read_csv(train_path)
+    test_df = pd.read_csv(test_path)
 
-train_df = pd.read_csv(TRAIN_CSV)
-test_df  = pd.read_csv(TEST_CSV)
-
-print(f"Train shape : {train_df.shape}")
-print(f"Test  shape : {test_df.shape}")
+    print(f"Train shape : {train_df.shape}")
+    print(f"Test  shape : {test_df.shape}")
+    return train_df, test_df
 
 
 # ============================================================
@@ -368,77 +380,88 @@ def build_graph(
 # 7. EXECUTION
 # ============================================================
 
-print("\n" + "=" * 60)
-print("Building dynamic account ID mapping...")
-print("=" * 60)
+def main() -> None:
+    print("\n" + "=" * 60)
+    print("GRAPH BUILDER PIPELINE - EXECUTION")
+    print("=" * 60)
 
-account_to_idx, known_train_accounts = build_account_mapping(train_df, test_df)
+    train_df, test_df = load_datasets()
 
-# Luu mapping va known set de dung lai khi inference (tuan 5)
-with open(MAPPING_PK, "wb") as f:
-    pickle.dump(
-        {
-            "account_to_idx"      : account_to_idx,
-            "known_train_accounts": known_train_accounts,
-        },
-        f,
+    print("\n" + "=" * 60)
+    print("Building dynamic account ID mapping...")
+    print("=" * 60)
+
+    account_to_idx, known_train_accounts = build_account_mapping(train_df, test_df)
+
+    # Luu mapping va known set de dung lai khi inference (tuan 5)
+    with open(MAPPING_PK, "wb") as f:
+        pickle.dump(
+            {
+                "account_to_idx"      : account_to_idx,
+                "known_train_accounts": known_train_accounts,
+            },
+            f,
+        )
+    print(f"Account mapping saved -> {MAPPING_PK}")
+
+    # ---
+
+    print("\n" + "=" * 60)
+    print("Fitting One-Hot Encoder (train only)...")
+    print("=" * 60)
+
+    ohe = fit_ohe_encoder(train_df)
+
+    with open(ENCODER_PK, "wb") as f:
+        pickle.dump(ohe, f)
+    print(f"OHE encoder saved -> {ENCODER_PK}")
+
+    # ---
+
+    print("\n" + "=" * 60)
+    print("Constructing PyTorch Geometric Datasets...")
+    print("=" * 60)
+
+    # TRAIN: structural stats & fraud history deu tu train_df
+    data_train = build_graph(
+        df                   = train_df,
+        structural_ref_df    = train_df,   # node features reflect train-time behavior
+        fraud_ref_df         = train_df,   # khong co leakage
+        acc_to_idx           = account_to_idx,
+        known_train_accounts = known_train_accounts,
+        ohe                  = ohe,
+        split_name           = "train",
     )
-print(f"Account mapping saved -> {MAPPING_PK}")
 
-# ---
+    # TEST: van dung train_df lam nguon tham chieu cho node features
+    #   - structural_ref_df = train_df: dam bao distribution nhat quan voi luc train
+    #   - fraud_ref_df      = train_df: khong ro ri nhan test
+    data_test = build_graph(
+        df                   = test_df,
+        structural_ref_df    = train_df,   # nhat quan voi tap train
+        fraud_ref_df         = train_df,   # khong co leakage
+        acc_to_idx           = account_to_idx,
+        known_train_accounts = known_train_accounts,
+        ohe                  = ohe,
+        split_name           = "test",
+    )
 
-print("\n" + "=" * 60)
-print("Fitting One-Hot Encoder (train only)...")
-print("=" * 60)
+    torch.save(data_train, TRAIN_PT)
+    torch.save(data_test,  TEST_PT)
 
-ohe = fit_ohe_encoder(train_df)
+    print("\n" + "=" * 60)
+    print("Graph building successfully completed & ready for Production!")
+    print("=" * 60)
+    print(f"  data_train.pt -> {TRAIN_PT}")
+    print(f"  data_test.pt  -> {TEST_PT}")
+    print()
+    print("Summary:")
+    print(f"  Nodes (global)   : {data_train.num_nodes:,}")
+    print(f"  Node feature dim : {data_train.x.shape[1]}")
+    print(f"  Edge feature dim : {data_train.edge_attr.shape[1]}")
+    print(f"  Train edges      : {data_train.edge_index.shape[1]:,}")
+    print(f"  Test  edges      : {data_test.edge_index.shape[1]:,}")
 
-with open(ENCODER_PK, "wb") as f:
-    pickle.dump(ohe, f)
-print(f"OHE encoder saved -> {ENCODER_PK}")
 
-# ---
-
-print("\n" + "=" * 60)
-print("Constructing PyTorch Geometric Datasets...")
-print("=" * 60)
-
-# TRAIN: structural stats & fraud history deu tu train_df
-data_train = build_graph(
-    df                   = train_df,
-    structural_ref_df    = train_df,   # node features reflect train-time behavior
-    fraud_ref_df         = train_df,   # khong co leakage
-    acc_to_idx           = account_to_idx,
-    known_train_accounts = known_train_accounts,
-    ohe                  = ohe,
-    split_name           = "train",
-)
-
-# TEST: van dung train_df lam nguon tham chieu cho node features
-#   - structural_ref_df = train_df: dam bao distribution nhat quan voi luc train
-#   - fraud_ref_df      = train_df: khong ro ri nhan test
-data_test = build_graph(
-    df                   = test_df,
-    structural_ref_df    = train_df,   # nhat quan voi tap train
-    fraud_ref_df         = train_df,   # khong co leakage
-    acc_to_idx           = account_to_idx,
-    known_train_accounts = known_train_accounts,
-    ohe                  = ohe,
-    split_name           = "test",
-)
-
-torch.save(data_train, TRAIN_PT)
-torch.save(data_test,  TEST_PT)
-
-print("\n" + "=" * 60)
-print("Graph building successfully completed & ready for Production!")
-print("=" * 60)
-print(f"  data_train.pt -> {TRAIN_PT}")
-print(f"  data_test.pt  -> {TEST_PT}")
-print()
-print("Summary:")
-print(f"  Nodes (global)   : {data_train.num_nodes:,}")
-print(f"  Node feature dim : {data_train.x.shape[1]}")
-print(f"  Edge feature dim : {data_train.edge_attr.shape[1]}")
-print(f"  Train edges      : {data_train.edge_index.shape[1]:,}")
-print(f"  Test  edges      : {data_test.edge_index.shape[1]:,}")
+if __name__ == "__main__":
+    main()
