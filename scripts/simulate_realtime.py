@@ -325,6 +325,7 @@ def infer_processed_transaction(
             "xai_subgraph_ms": 0.0,
             "gnnexplainer_ms": 0.0,
             "reason_code_ms": 0.0,
+            "reason_code_output_ms": 0.0,
             "explanation_generated": False,
         },
     }
@@ -411,6 +412,7 @@ def process_transaction(
     mode: str = "latency",
     reporter: TransactionReporter | None = None,
     report_dir: Path | None = None,
+    reason_codes_output_dir: Path | None = None,
     force_report: bool = False,
 ) -> tuple[str, float, float, float, dict[str, Any]]:
     """
@@ -457,8 +459,59 @@ def process_transaction(
     breakdown["total_with_gemini_ms"] = breakdown["total_model_xai_ms"]
     breakdown["report_generated"] = False
 
-    if mode not in {"latency", "gemini-report"}:
-        raise ValueError("mode phải là 'latency' hoặc 'gemini-report'")
+    if mode not in {"latency", "local-reason-codes", "gemini-report"}:
+        raise ValueError(
+            "mode phải là 'latency', 'local-reason-codes' hoặc 'gemini-report'"
+        )
+
+    if mode in {"local-reason-codes", "gemini-report"} and inference.get("is_fraud") is True:
+        explanation = inference.get("explanation")
+        reason_codes = inference.get("reason_codes")
+        if (
+            mode == "local-reason-codes"
+            and explanation is not None
+            and reason_codes is not None
+            and reason_codes_output_dir is not None
+        ):
+            reason_output_start = time.perf_counter()
+            transaction_id = (
+                f"{parsed_row.get('Sender_account', 'unknown')}_"
+                f"{parsed_row.get('Receiver_account', 'unknown')}"
+            )
+            document = _REASON_CODE_GENERATOR.build_document(
+                explanation,
+                transaction_features={
+                    **processed_tx.feature_dict,
+                    "is_new_sender": processed_tx.is_new_sender,
+                    "is_new_receiver": processed_tx.is_new_receiver,
+                },
+                transaction_id=transaction_id,
+                top_k=5,
+            )
+            reason_codes_output_dir.mkdir(parents=True, exist_ok=True)
+            safe_id = "".join(
+                character if character.isalnum() or character in "._-" else "_"
+                for character in transaction_id
+            )
+            reason_code_path = reason_codes_output_dir / f"transaction_{safe_id}.json"
+            reason_code_path.write_text(
+                json.dumps(document, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            inference["reason_code_output_path"] = str(reason_code_path)
+            inference["reason_code_status"] = "success"
+            reason_output_ms = (
+                time.perf_counter() - reason_output_start
+            ) * 1000.0
+            breakdown["reason_code_output_ms"] = reason_output_ms
+            breakdown["reason_code_ms"] += reason_output_ms
+            inference_latency += reason_output_ms / 1000.0
+            breakdown["total_model_xai_ms"] += reason_output_ms
+            breakdown["total_with_gemini_ms"] = breakdown["total_model_xai_ms"]
+        elif mode == "local-reason-codes" and inference.get("xai_error"):
+            inference["reason_code_status"] = "failed"
+        elif mode == "local-reason-codes":
+            inference["reason_code_status"] = "success"
 
     if mode == "gemini-report" and inference.get("is_fraud") is True:
         explanation = inference.get("explanation")
@@ -566,6 +619,7 @@ def load_and_simulate_transactions(
     gemini_timeout: float = 30.0,
     gemini_retry_count: int = 2,
     report_dir: str | Path | None = None,
+    reason_codes_output_dir: str | Path | None = None,
     prompt_file: str | Path | None = None,
     top_k: int = 5,
     max_prompt_chars: int = 12000,
@@ -581,8 +635,10 @@ def load_and_simulate_transactions(
         raise ValueError("limit phải lớn hơn 0")
     if warmup_runs < 0:
         raise ValueError("warmup_runs không được âm")
-    if mode not in {"latency", "gemini-report"}:
-        raise ValueError("mode phải là 'latency' hoặc 'gemini-report'")
+    if mode not in {"latency", "local-reason-codes", "gemini-report"}:
+        raise ValueError(
+            "mode phải là 'latency', 'local-reason-codes' hoặc 'gemini-report'"
+        )
 
     reporter = None
     if mode == "gemini-report":
@@ -619,6 +675,13 @@ def load_and_simulate_transactions(
             if Path(xai_output_dir).is_absolute()
             else _repository_root() / xai_output_dir
         )
+    resolved_reason_codes_dir: Path | None = None
+    if reason_codes_output_dir is not None:
+        resolved_reason_codes_dir = (
+            Path(reason_codes_output_dir)
+            if Path(reason_codes_output_dir).is_absolute()
+            else _repository_root() / reason_codes_output_dir
+        )
 
     total_rows = 0
     error_rows = 0
@@ -647,13 +710,17 @@ def load_and_simulate_transactions(
                     tx_json, d_lat, i_lat, t_lat, inference = process_transaction(
                         row,
                         verbose=verbose,
-                        enable_xai=enable_xai or mode == "gemini-report",
+                        enable_xai=enable_xai or mode in {
+                            "local-reason-codes",
+                            "gemini-report",
+                        },
                         xai_epochs=xai_epochs,
                         xai_num_hops=xai_num_hops,
                         xai_output_dir=resolved_xai_dir,
                         mode=mode,
                         reporter=reporter,
                         report_dir=Path(report_dir) if report_dir else None,
+                        reason_codes_output_dir=resolved_reason_codes_dir,
                         force_report=force_report,
                     )
                 except Exception as exc:
@@ -700,6 +767,17 @@ def load_and_simulate_transactions(
                     "error_message": inference.get("xai_error", ""),
                     "report_status": inference.get("report_status", ""),
                     "gemini_error": inference.get("gemini_error", ""),
+                    "reason_code_status": inference.get("reason_code_status", ""),
+                    "reason_code_output_path": inference.get(
+                        "reason_code_output_path", ""
+                    ),
+                    "reason_codes": "|".join(
+                        item.get("code", "")
+                        for item in inference.get("reason_codes", {}).get(
+                            "reason_codes", []
+                        )
+                        if isinstance(item, dict)
+                    ),
                     "is_cold_start": inference.get("is_cold_start", False),
                 })
 
@@ -902,7 +980,8 @@ def _write_benchmark_outputs(
         "transaction_index", "sender_account", "receiver_account",
         "fraud_probability", "is_fraud", "data_processing_ms",
         "graphsage_inference_ms", "xai_subgraph_ms", "gnnexplainer_ms",
-        "reason_code_ms", "total_ms", "total_model_xai_ms",
+        "reason_code_ms", "reason_code_output_ms", "total_ms",
+        "total_model_xai_ms",
         "gemini_called", "gemini_report_ms", "total_with_gemini_ms",
         "explanation_generated", "report_generated", "report_status",
         "status", "error_type", "error_message",
@@ -935,15 +1014,18 @@ def _write_benchmark_outputs(
         "statistics": {
             "all": {field: _latency_stats(successful, field, include_cold_start) for field in (
                 "data_processing_ms", "graphsage_inference_ms", "xai_subgraph_ms",
-                "gnnexplainer_ms", "reason_code_ms", "total_ms",
+                "gnnexplainer_ms", "reason_code_ms", "reason_code_output_ms",
+                "total_ms",
                 "total_model_xai_ms", "gemini_report_ms", "total_with_gemini_ms")},
             "fraud": {field: _latency_stats(fraud, field, include_cold_start) for field in (
                 "data_processing_ms", "graphsage_inference_ms", "xai_subgraph_ms",
-                "gnnexplainer_ms", "reason_code_ms", "total_ms",
+                "gnnexplainer_ms", "reason_code_ms", "reason_code_output_ms",
+                "total_ms",
                 "total_model_xai_ms", "gemini_report_ms", "total_with_gemini_ms")},
             "xai": {field: _latency_stats(explained, field, include_cold_start) for field in (
                 "data_processing_ms", "graphsage_inference_ms", "xai_subgraph_ms",
-                "gnnexplainer_ms", "reason_code_ms", "total_ms",
+                "gnnexplainer_ms", "reason_code_ms", "reason_code_output_ms",
+                "total_ms",
                 "total_model_xai_ms", "gemini_report_ms", "total_with_gemini_ms")},
             "gemini_success": {
                 field: _latency_stats(report_success, field, include_cold_start)
@@ -1075,9 +1157,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("latency", "gemini-report"),
+        choices=("latency", "local-reason-codes", "gemini-report"),
         default="latency",
-        help="chế độ latency an toàn hoặc tạo report Gemini cho fraud",
+        help=(
+            "latency, reason code cục bộ không gọi API, "
+            "hoặc tạo report Gemini cho fraud"
+        ),
     )
     parser.add_argument(
         "--enable-xai",
@@ -1118,6 +1203,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gemini-timeout", type=float, default=30.0)
     parser.add_argument("--gemini-retry-count", type=int, default=2)
     parser.add_argument("--report-dir", type=Path, default=None)
+    parser.add_argument(
+        "--reason-codes-output-dir",
+        type=Path,
+        default=None,
+        help="thư mục lưu reason-code JSON khi dùng local-reason-codes",
+    )
     parser.add_argument("--prompt-file", type=Path, default=None)
     parser.add_argument("--top-k", type=_positive_int, default=5)
     parser.add_argument("--max-prompt-chars", type=_positive_int, default=12000)
@@ -1163,6 +1254,7 @@ def main() -> None:
             gemini_timeout=args.gemini_timeout,
             gemini_retry_count=args.gemini_retry_count,
             report_dir=args.report_dir,
+            reason_codes_output_dir=args.reason_codes_output_dir,
             prompt_file=args.prompt_file,
             top_k=args.top_k,
             max_prompt_chars=args.max_prompt_chars,

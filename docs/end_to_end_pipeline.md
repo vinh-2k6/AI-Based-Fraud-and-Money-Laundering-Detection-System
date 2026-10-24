@@ -515,7 +515,11 @@ python scripts\simulate_realtime.py `
 ```
 
 Metrics tách riêng `data_processing_ms`, `graphsage_inference_ms`,
-`xai_subgraph_ms`, `gnnexplainer_ms`, `reason_code_ms` và `total_ms`.
+`xai_subgraph_ms`, `gnnexplainer_ms`, `reason_code_ms`,
+`reason_code_output_ms` và `total_ms`. Với `local-reason-codes`,
+`reason_code_output_ms` gồm thời gian tạo document và ghi JSON; phần này
+được cộng vào `reason_code_ms`, `inference_latency`,
+`total_model_xai_ms` và `total_ms`.
 Summary JSON chứa mean, P50, P95, P99, min, max cho toàn bộ giao dịch,
 giao dịch fraud và giao dịch đã chạy XAI. Warm-up không được đưa vào các
 thống kê chính; dùng `--include-cold-start` nếu muốn đưa các giao dịch
@@ -525,13 +529,35 @@ nguyên và không gọi Gemini. Tùy chọn `--latency-plot-output` tạo biể
 và ngưỡng SLA 100 ms. Cần cài `matplotlib` nếu môi trường chưa có thư viện
 này.
 
-`simulate_realtime.py` có hai chế độ chạy:
+`simulate_realtime.py` có ba chế độ chạy:
 
 - `--mode latency` (mặc định): chạy prediction và XAI tùy chọn, tuyệt đối
   không khởi tạo hoặc gọi Gemini.
+- `--mode local-reason-codes`: khi phát hiện fraud, tự động chạy
+  GNNExplainer và `ReasonCodeGenerator` tại chỗ, lưu reason code JSON và
+  tuyệt đối không khởi tạo hoặc gọi API bên ngoài.
 - `--mode gemini-report`: tự bật XAI cho giao dịch bị đánh dấu fraud, sau đó
   dùng `TransactionReporter` để tạo report. Giao dịch non-fraud không gọi
   Gemini và không tạo report.
+
+Ví dụ chỉ chạy XAI và sinh reason code cục bộ:
+
+```powershell
+python scripts\simulate_realtime.py `
+  --file_path data\processed\test_cleaned.csv `
+  --limit 100 `
+  --mode local-reason-codes `
+  --xai-epochs 200 `
+  --xai-num-hops 2 `
+  --xai-output-dir data\processed\xai_realtime `
+  --reason-codes-output-dir data\processed\reason_codes_realtime `
+  --verbose
+```
+
+Mỗi giao dịch bị đánh dấu fraud sẽ tạo một file
+`transaction_<sender>_<receiver>.json` trong thư mục reason-code output.
+Các trường `reason_codes`, `explanation_status` và bằng chứng top edge/node
+được tạo hoàn toàn từ model và subgraph cục bộ.
 
 Ví dụ tạo report:
 

@@ -1,0 +1,89 @@
+{
+  "transaction_id": "3130936563_9140659953",
+  "prediction": {
+    "label": "fraud",
+    "fraud_probability": 0.9687010049819946,
+    "threshold": 0.5
+  },
+  "transaction": {
+    "sender_account": 3130936563,
+    "receiver_account": 9140659953,
+    "sender_idx": 138378,
+    "receiver_idx": 105009,
+    "Amount_scaled": 0.5611431,
+    "sender_tx_count_24h_scaled": 0.8365182,
+    "receiver_tx_count_24h_scaled": 0.85060513,
+    "sender_amount_sum_24h_scaled": 0.87196517,
+    "time_since_last_sender_tx_scaled": 0.4708343,
+    "is_new_sender": false,
+    "is_new_receiver": false
+  },
+  "reason_codes": [
+    {
+      "code": "RC-XAI-LOW-SIGNAL",
+      "description": "Không đủ bằng chứng XAI nổi bật",
+      "importance": 1.0,
+      "value": null,
+      "source": "model_or_gnnexplainer"
+    }
+  ],
+  "explanation": {
+    "top_edges": [
+      {
+        "index": 270,
+        "importance": 1.0,
+        "nodes": null
+      },
+      {
+        "index": 741,
+        "importance": 0.998858,
+        "nodes": null
+      },
+      {
+        "index": 383,
+        "importance": 0.998513,
+        "nodes": null
+      },
+      {
+        "index": 740,
+        "importance": 0.997785,
+        "nodes": null
+      },
+      {
+        "index": 853,
+        "importance": 0.996662,
+        "nodes": null
+      }
+    ],
+    "top_nodes": [
+      {
+        "index": 6,
+        "importance": 1.0
+      },
+      {
+        "index": 3,
+        "importance": 0.807402
+      },
+      {
+        "index": 8,
+        "importance": 0.782703
+      },
+      {
+        "index": 32,
+        "importance": 0.388065
+      },
+      {
+        "index": 10,
+        "importance": 0.360268
+      }
+    ],
+    "top_k": 5
+  },
+  "graph_context": {
+    "num_nodes": 0,
+    "num_edges": 0,
+    "num_hops": 2,
+    "num_fraud_edges": 0
+  },
+  "explanation_status": "XAI_LOW_SIGNAL"
+}
