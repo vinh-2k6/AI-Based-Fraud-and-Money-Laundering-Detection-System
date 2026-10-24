@@ -115,10 +115,10 @@ def train():
     train_data = torch.load("data/processed/data_train.pt", weights_only=False).to(device)
     test_data = torch.load("data/processed/data_test.pt", weights_only=False).to(device)
 
-    # 2. Khởi tạo DataLoader lấy mẫu láng giềng  cho CPU
+    # 2. Khởi tạo DataLoader lấy mẫu láng giềng
     train_loader = LinkNeighborLoader(
         data=train_data,
-        num_neighbors=[10, 10],       #  số láng giềng lấy mẫu (tầng 1: 10, tầng 2: 5)
+        num_neighbors=[15, 10],       #  số láng giềng lấy mẫu (tầng 1: 15, tầng 2: 10)
         edge_label_index=train_data.edge_index,
         edge_label=train_data.y,
         batch_size=4096,           
@@ -129,7 +129,7 @@ def train():
 
     test_loader = LinkNeighborLoader(
         data=test_data,
-        num_neighbors=[10, 10],
+        num_neighbors=[15, 10],
         edge_label_index=test_data.edge_index,
         edge_label=test_data.y,
         batch_size=4096,
@@ -146,8 +146,8 @@ def train():
     criterion = FocalLoss(alpha=0.75, gamma=2.0)
 
     # 4. Vòng lặp huấn luyện 
-    epochs = 12
-    max_batches_per_epoch = 350  # giới hạn batch trong mỗi epoch 
+    epochs = 15
+    # max_batches_per_epoch = 400  # giới hạn batch trong mỗi epoch 
 
     print("\nBắt đầu huấn luyện...")
     for epoch in range(1, epochs + 1):
@@ -170,8 +170,8 @@ def train():
             total_loss += loss.item() * batch_size_current
             total_samples += batch_size_current
             
-            if i >= max_batches_per_epoch:
-                break
+            # if i >= max_batches_per_epoch:
+            #     break
                 
         avg_loss = total_loss / total_samples if total_samples > 0 else 0
         print(f"Epoch {epoch}/{epochs} - Loss: {avg_loss:.4f}")
@@ -197,7 +197,8 @@ def train():
             out = model(batch.x, batch.edge_index, batch.edge_label_index)
             # Dùng hàm sigmoid để chuyển logit thành xác suất, ngưỡng 0.5
             probs = torch.sigmoid(out)
-            preds = (probs > 0.5).long().cpu().numpy()
+
+            preds = (probs > 0.66).long().cpu().numpy()
             labels = batch.edge_label.cpu().numpy()
             
             all_preds.extend(preds)
@@ -205,6 +206,7 @@ def train():
 
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
+
 
     print("\n=== MA TRẬN NHẦM LẪN (GNN) ===")
     print(confusion_matrix(all_labels, all_preds))

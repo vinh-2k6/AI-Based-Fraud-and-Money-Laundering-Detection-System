@@ -6,8 +6,8 @@ class FraudDetectionGNN(nn.Module):
     def __init__(self, in_channels, hidden_channels):
         super(FraudDetectionGNN, self).__init__()
         # 2 lớp SAGEConv để gom thông tin láng giềng trong bán kính 2 bước
-        self.conv1 = SAGEConv(in_channels, hidden_channels)
-        self.conv2 = SAGEConv(hidden_channels, hidden_channels)
+        self.conv1 = SAGEConv(in_channels, hidden_channels,aggr='max')
+        self.conv2 = SAGEConv(hidden_channels, hidden_channels,aggr='max')
         
         # Linear layer cuối: Nhận đầu vào gấp đôi vì ghép vector (Người gửi + Người nhận)
         self.classifier = nn.Linear(hidden_channels * 2, 1)
