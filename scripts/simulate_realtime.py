@@ -70,7 +70,7 @@ DEFAULT_CHECKPOINT_PATH = (
     else BASE_DIR / "data" / "processed" / "graphsage_model.pt"
 )
 DEFAULT_XAI_OUTPUT_DIR = BASE_DIR / "data" / "processed" / "xai_explanations"
-DEFAULT_THRESHOLD = 0.5
+DEFAULT_THRESHOLD = 0.66
 DEFAULT_XAI_EPOCHS = 200
 MAX_VERBOSE_ROWS = 10
 

@@ -239,7 +239,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-csv", type=Path, default=DEFAULT_TEST_CSV)
     parser.add_argument("--output-dir", type=Path, default=BASE_DIR / "results")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
-    parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--threshold", type=float, default=0.66)
     return parser.parse_args()
 
 
